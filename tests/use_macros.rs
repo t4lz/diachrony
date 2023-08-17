@@ -1,4 +1,4 @@
-use diachrony::{field, message};
+use diachrony::message;
 
 #[message(from_version = 0)]
 struct AddedField {
@@ -25,10 +25,11 @@ struct AddedAndRemovedMessage {
 #[test]
 fn construct() {
     // TODO: AddedField should not exist, only versions.
-    let af = AddedField {
+    let af = AddedFieldV0 { field_a: 0 };
+    let af = AddedFieldV1 {
         field_a: 0,
         field_b: 42,
     };
-    let am = AddedMessage { field_a: 0 };
-    let am = RemovedMessage { field_a: 0 };
+    let am = AddedMessageV1 { field_a: 0 };
+    let am = RemovedMessageV1 { field_a: 0 };
 }
