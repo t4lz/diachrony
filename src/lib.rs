@@ -8,7 +8,7 @@ use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::{parse_macro_input, Attribute, Field, Fields, FieldsNamed, Ident, ItemStruct};
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct VersionChange {
     // TODO: for removed fields, we probably don't need the field object, just the name.
     pub removed_fields: HashSet<Field>,
@@ -86,7 +86,8 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
     let fields = message_struct.fields.clone();
     let name = message_struct.ident.to_string();
 
-    for field in fields {
+    'fields: for field in fields {
+        println!("processing field {:?}", field.clone().ident.unwrap()); // TODO: remove
         for (i, field_attr) in field.attrs.iter().enumerate() {
             // TODO: is_ident is not good, because we also want to match diachrony::field (and we
             //  don't want to match `field` if it's not imported form diachrony.
@@ -104,20 +105,27 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
                     let version_change = version_changes.entry(until_version).or_default();
                     let VersionChange { removed_fields, .. } = version_change;
                     removed_fields.insert(field.clone());
-                } else {
-                    initial_fields.push(field.clone());
                 }
                 if let Some(from_version) = field_args.from_version {
+                    println!("from_version: {from_version}");
                     // TODO: verify that the from_version of this field is higher than the
                     //  from_version of the message (if there).
                     let version_change = version_changes.entry(from_version).or_default();
                     let VersionChange { new_fields, .. } = version_change;
                     new_fields.insert(field);
+                    println!(
+                        "inserted field into version change. Version change: {:?}",
+                        version_changes.get(&from_version).unwrap()
+                    );
+                } else {
+                    initial_fields.push(field.clone());
                 }
                 println!("field_args: {field_args:#?}");
-                continue;
+                continue 'fields;
             }
         }
+        // No `field` attribute.
+        initial_fields.push(field.clone());
     }
     let mut struct_versions = Vec::with_capacity(version_changes.len());
 

@@ -31,5 +31,5 @@ fn construct() {
         field_b: 42,
     };
     let am = AddedMessageV1 { field_a: 0 };
-    let am = RemovedMessageV1 { field_a: 0 };
+    let am = RemovedMessageV0 { field_a: 0 };
 }
