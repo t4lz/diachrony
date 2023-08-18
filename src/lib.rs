@@ -81,7 +81,7 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let mut version_changes = BTreeMap::new();
-    let mut initial_fields = Vec::new();
+    let mut initial_fields = HashSet::new();
 
     let fields = message_struct.fields.clone();
     let name = message_struct.ident.to_string();
@@ -118,39 +118,48 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
                         version_changes.get(&from_version).unwrap()
                     );
                 } else {
-                    initial_fields.push(field.clone());
+                    initial_fields.insert(field.clone());
                 }
                 println!("field_args: {field_args:#?}");
                 continue 'fields;
             }
         }
         // No `field` attribute.
-        initial_fields.push(field.clone());
+        initial_fields.insert(field.clone());
     }
     let mut struct_versions = Vec::with_capacity(version_changes.len());
 
     // TODO: extract repeated code to func.
-    let mut first_struct = message_struct.clone();
     let struct_name = format!("{name}V{}", args.from_version);
-    first_struct.ident = Ident::new(&struct_name, first_struct.ident.span());
-    match &mut first_struct.fields {
+    message_struct.ident = Ident::new(&struct_name, message_struct.ident.span());
+    match &mut message_struct.fields {
         Fields::Named(named) => named.named = Punctuated::from_iter(initial_fields.clone()),
         Fields::Unnamed(_) => {}
         Fields::Unit => {}
     }
 
-    struct_versions.push(TokenStream::from(first_struct.into_token_stream()));
+    struct_versions.push(TokenStream::from(
+        message_struct.clone().into_token_stream(),
+    ));
 
     for (version, version_change) in version_changes {
-        let mut next_struct = message_struct.clone();
+        println!("generating version {version}");
         let struct_name = format!("{name}V{version}");
-        next_struct.ident = Ident::new(&struct_name, next_struct.ident.span());
-        match &mut next_struct.fields {
+        message_struct.ident = Ident::new(&struct_name, message_struct.ident.span());
+        initial_fields = &initial_fields - &version_change.removed_fields;
+        initial_fields = initial_fields
+            .union(&version_change.new_fields)
+            // TODO: can avoid cloning?
+            .cloned()
+            .collect();
+        match &mut message_struct.fields {
             Fields::Named(named) => named.named = Punctuated::from_iter(initial_fields.clone()),
             Fields::Unnamed(_) => {}
             Fields::Unit => {}
         }
-        struct_versions.push(TokenStream::from(next_struct.into_token_stream()));
+        struct_versions.push(TokenStream::from(
+            message_struct.clone().into_token_stream(),
+        ));
     }
 
     // let mut struct_versions = Vec::with_capacity(version_changes.len());
