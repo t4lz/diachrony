@@ -44,6 +44,7 @@ impl FromAttributes for FieldMacroArgs {
     }
 }
 
+// TODO: doctests are failing.
 /// Generate different structs for different versions of this message (according to attributes over
 /// its fields) and add it to all message Enums it should exist in (according to attribute
 /// arguments).

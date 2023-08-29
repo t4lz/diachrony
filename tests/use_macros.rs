@@ -24,7 +24,7 @@ struct AddedAndRemovedMessage {
 
 #[test]
 fn construct() {
-    // TODO: AddedField should not exist, only versions.
+    // TODO: don't use generated version structs.
     let af = AddedFieldV0 { field_a: 0 };
     let af = AddedFieldV1 {
         field_a: 0,
