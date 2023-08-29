@@ -162,44 +162,6 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
         ));
     }
 
-    // let mut struct_versions = Vec::with_capacity(version_changes.len());
-    // for (version, version_change) in version_changes {
-    //     let mut next_struct = message_struct.clone();
-    //     let struct_name = format!("{name}V{version}");
-    //     let next_fields = next_struct.fields.into_iter().filter_map(|mut field| {
-    //         // TODO: unwrap
-    //         let args = FieldMacroArgs::from_attributes(&field.attrs).unwrap();
-    //
-    //         // Remove the `field` attribute.
-    //         field.attrs = field
-    //             .attrs
-    //             .into_iter()
-    //             .filter(|attr| !attr.path().is_ident("field"))
-    //             .collect();
-    //
-    //         let field_added_before_or_in_this_version = args
-    //             .from_version
-    //             .map(|field_addition_version| field_addition_version <= version)
-    //             .unwrap_or(true);
-    //         let field_not_removed_yet_in_this_version = args
-    //             .until_version
-    //             .map(|field_removal_version| field_removal_version > version)
-    //             .unwrap_or(true);
-    //
-    //         (field_added_before_or_in_this_version && field_not_removed_yet_in_this_version)
-    //             .then_some(field)
-    //     });
-    //     // let fields = quote! {
-    //     //     #(#next_fields,)*
-    //     // };
-    //     match &next_struct.fields {
-    //         Fields::Named(mut named) => named.named = Punctuated::from_iter(next_fields),
-    //         Fields::Unnamed(_) => {}
-    //         Fields::Unit => {}
-    //     }
-    //     struct_versions.push(next_struct);
-    // }
-
     TokenStream::from_iter(struct_versions)
 }
 
