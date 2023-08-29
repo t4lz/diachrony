@@ -50,6 +50,8 @@ impl FromAttributes for FieldMacroArgs {
 ///
 /// E.g. for:
 /// ```
+/// use diachrony::message;
+///
 /// #[message(version_from=1)]
 /// struct MyMessage {
 ///     field_a: u8,
@@ -81,7 +83,7 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let mut version_changes = BTreeMap::new();
-    let mut initial_fields = HashSet::new();
+    let mut message_fields = HashSet::new();
 
     let fields = message_struct.fields.clone();
     let name = message_struct.ident.to_string();
@@ -118,51 +120,58 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
                         version_changes.get(&from_version).unwrap()
                     );
                 } else {
-                    initial_fields.insert(field.clone());
+                    message_fields.insert(field.clone());
                 }
                 println!("field_args: {field_args:#?}");
                 continue 'fields;
             }
         }
         // No `field` attribute.
-        initial_fields.insert(field.clone());
+        message_fields.insert(field.clone());
     }
     let mut struct_versions = Vec::with_capacity(version_changes.len());
 
-    // TODO: extract repeated code to func.
-    let struct_name = format!("{name}V{}", args.from_version);
-    message_struct.ident = Ident::new(&struct_name, message_struct.ident.span());
-    match &mut message_struct.fields {
-        Fields::Named(named) => named.named = Punctuated::from_iter(initial_fields.clone()),
-        Fields::Unnamed(_) => {}
-        Fields::Unit => {}
-    }
-
-    struct_versions.push(TokenStream::from(
-        message_struct.clone().into_token_stream(),
+    struct_versions.push(make_struct_version(
+        &mut message_struct,
+        &name,
+        args.from_version,
+        &message_fields,
     ));
 
     for (version, version_change) in version_changes {
-        println!("generating version {version}");
-        let struct_name = format!("{name}V{version}");
-        message_struct.ident = Ident::new(&struct_name, message_struct.ident.span());
-        initial_fields = &initial_fields - &version_change.removed_fields;
-        initial_fields = initial_fields
+        println!("generating version {version}"); // TODO: delete.
+        message_fields = &message_fields - &version_change.removed_fields;
+        message_fields = message_fields
             .union(&version_change.new_fields)
             // TODO: can avoid cloning?
             .cloned()
             .collect();
-        match &mut message_struct.fields {
-            Fields::Named(named) => named.named = Punctuated::from_iter(initial_fields.clone()),
-            Fields::Unnamed(_) => {}
-            Fields::Unit => {}
-        }
-        struct_versions.push(TokenStream::from(
-            message_struct.clone().into_token_stream(),
+        struct_versions.push(make_struct_version(
+            &mut message_struct,
+            &name,
+            version,
+            &message_fields,
         ));
     }
 
     TokenStream::from_iter(struct_versions)
+}
+
+/// Create a TokenStream of a message struct of the given version with the given fields.
+fn make_struct_version(
+    message_struct: &mut ItemStruct,
+    base_name: &str,
+    version: u16,
+    fields: &HashSet<Field>,
+) -> TokenStream {
+    let struct_name = format!("{base_name}V{}", version);
+    message_struct.ident = Ident::new(&struct_name, message_struct.ident.span());
+    match &mut message_struct.fields {
+        Fields::Named(named) => named.named = Punctuated::from_iter(fields.clone()),
+        Fields::Unnamed(_) => {}
+        Fields::Unit => {}
+    }
+    TokenStream::from(message_struct.clone().into_token_stream())
 }
 
 #[proc_macro_attribute]
