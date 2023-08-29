@@ -3,10 +3,9 @@ use darling::{Error, FromAttributes, FromMeta};
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
 use std::collections::{BTreeMap, HashSet};
-use syn;
-use syn::parse::Parser;
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, Attribute, Field, Fields, FieldsNamed, Ident, ItemStruct};
+use syn::Expr::{Lit, Path};
+use syn::{parse_macro_input, Attribute, Expr, Field, Fields, Ident, ItemStruct, Token};
 
 #[derive(Default, Debug)]
 struct VersionChange {
@@ -139,7 +138,19 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
         &message_fields,
     ));
 
+    let last_version = args.from_version;
+
     for (version, version_change) in version_changes {
+        let last_version_name = format!("{name}V{last_version}");
+        for alias_version in last_version + 1..version {
+            let alias_name = format!("{name}V{alias_version}");
+            let type_alias = quote! {
+                type #alias_name = #last_version_name;
+            };
+            // convert from proc_macro2 TokenStream to standard TokenStream. Not sure whether this is my fault or not.
+            let alias_token_stream = TokenStream::from(type_alias.into_token_stream());
+            struct_versions.push(alias_token_stream)
+        }
         println!("generating version {version}"); // TODO: delete.
         message_fields = &message_fields - &version_change.removed_fields;
         message_fields = message_fields
@@ -153,6 +164,7 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
             version,
             &message_fields,
         ));
+        let last_version = version;
     }
 
     TokenStream::from_iter(struct_versions)
@@ -180,6 +192,75 @@ pub fn field(args: TokenStream, item: TokenStream) -> TokenStream {
     println!("attr: \"{}\"", args.to_string());
     println!("item: \"{}\"", item.to_string());
     item
+}
+
+// struct MessageGroupMacroArgs {
+//     group_name: String,
+//     version_range: Range<u16>,
+//     message_types: Vec<String>,
+// }
+//
+// impl Parse for MessageGroupMacroArgs {
+//     fn parse(input: ParseStream) -> Result<Self, syn::Error> {
+//         let group_name: String = input.parse()?;
+//         let _: _ = input.
+//     }
+// }
+
+// TODO: should this be a declarative macro? Was too lazy to start a new crate.
+#[proc_macro]
+pub fn message_group(args: TokenStream) -> TokenStream {
+    let items = parse_macro_input!(args with Punctuated<Expr, Token![,]>::parse_terminated);
+    let mut exprs = items.iter();
+    let group_name = exprs.next().unwrap(); // TODO: unwrap
+    let Path(group_name) = group_name else {
+        // TODO: panic?
+        panic!("First argument of message_group! should be the group name (enum name).")
+    };
+    let group_name = group_name.path.get_ident().unwrap().to_string(); // TODO: unwrap
+    let from_version = exprs.next().unwrap(); // TODO: unwrap
+    let Lit(from_version) = from_version else {
+        panic!("Expected version literal at second argument for message_group {group_name}.") // TODO?
+    };
+    let syn::Lit::Int(ref lit_int) = from_version.lit else {
+        panic!("Expected int literal (version) at second argument for message_group {group_name}.") // TODO?
+    };
+    let from_version = lit_int.base10_parse::<u16>().unwrap();
+    let to_version = exprs.next().unwrap(); // TODO: unwrap
+    let Lit(to_version) = to_version else {
+        panic!("Expected version literal at second argument for message_group {group_name}.") // TODO?
+    };
+    let syn::Lit::Int(ref lit_int) = to_version.lit else {
+        panic!("Expected int literal (version) at second argument for message_group {group_name}.") // TODO?
+    };
+    let to_version = lit_int.base10_parse::<u16>().unwrap();
+    let message_types: Vec<String> = exprs
+        .map(|expr| {
+            let Path(expr_path) = expr else {
+            panic!("Unexpected expression type in message_group {group_name} message types. Should be identifier (message name).") // TODO?
+        };
+            expr_path.path.get_ident().unwrap().to_string() // TODO: unwrap
+        })
+        .collect();
+
+    let mut version_enums = Vec::with_capacity((to_version - from_version) as usize);
+
+    for version in from_version..=to_version {
+        let enum_name = format!("{group_name}V{version}");
+        let message_names = message_types
+            .iter()
+            .cloned()
+            .map(|message_name| format!("{message_name}V{version}"));
+        let message_group_enum = quote! {
+            enum #enum_name { // set the struct to public
+                #(#message_types(#message_names),)*
+            }
+        };
+        // convert from proc_macro2 TokenStream to standard TokenStream.
+        let group_enum = TokenStream::from(message_group_enum.into_token_stream());
+        version_enums.push(group_enum);
+    }
+    TokenStream::from_iter(version_enums)
 }
 
 fn add(left: usize, right: usize) -> usize {

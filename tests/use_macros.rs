@@ -1,4 +1,4 @@
-use diachrony::message;
+use diachrony::{message, message_group};
 
 #[message(from_version = 0)]
 struct AddedField {
@@ -21,6 +21,16 @@ struct RemovedMessage {
 struct AddedAndRemovedMessage {
     field_a: u8,
 }
+
+message_group!(
+    ClientMessage,
+    2,
+    5,
+    AddedField,
+    AddedMessage,
+    RemovedMessage,
+    AddedAndRemovedMessage
+);
 
 #[test]
 fn construct() {
