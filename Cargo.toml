@@ -12,3 +12,4 @@ proc-macro = true
 quote = "1"
 syn = {version = "2", features = ["full"] }
 darling = "0.20"
+macro_state = "0.2.0"

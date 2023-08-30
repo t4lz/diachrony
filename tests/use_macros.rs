@@ -1,36 +1,30 @@
-use diachrony::{message, message_group};
+use diachrony::{current_version, message, message_group};
 
-#[message(from_version = 0)]
+current_version!(4);
+
+#[message(group = ClientMessage, from_version = 0)]
 struct AddedField {
     field_a: u8,
     #[field(from_version = 1)]
     field_b: u8,
 }
 
-#[message(from_version = 1)]
+#[message(group = ClientMessage, from_version = 1)]
 struct AddedMessage {
     field_a: u8,
 }
 
-#[message(from_version = 0, until_version = 2)]
+#[message(group = ClientMessage, from_version = 0, until_version = 2)]
 struct RemovedMessage {
     field_a: u8,
 }
 
-#[message(from_version = 1, until_version = 2)]
+#[message(group = ClientMessage, from_version = 1, until_version = 2)]
 struct AddedAndRemovedMessage {
     field_a: u8,
 }
 
-message_group!(
-    ClientMessage,
-    2,
-    5,
-    AddedField,
-    AddedMessage,
-    RemovedMessage,
-    AddedAndRemovedMessage
-);
+message_group!(ClientMessage);
 
 #[test]
 fn construct() {
