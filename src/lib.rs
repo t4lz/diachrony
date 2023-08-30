@@ -254,7 +254,6 @@ pub fn field(args: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-// TODO: should this be a declarative macro? Was too lazy to start a new crate.
 #[proc_macro]
 pub fn message_group(args: TokenStream) -> TokenStream {
     let items = parse_macro_input!(args with Punctuated<Expr, Token![,]>::parse_terminated);
