@@ -3,24 +3,24 @@ use diachrony::{current_version, message, message_group};
 current_version!(4);
 
 #[message(group = ClientMessage, from_version = 0)]
-struct AddedField {
+pub struct AddedField {
     field_a: u8,
     #[field(from_version = 1)]
     field_b: u8,
 }
 
 #[message(group = ClientMessage, from_version = 1)]
-struct AddedMessage {
+pub struct AddedMessage {
     field_a: u8,
 }
 
 #[message(group = ClientMessage, from_version = 0, until_version = 2)]
-struct RemovedMessage {
+pub struct RemovedMessage {
     field_a: u8,
 }
 
 #[message(group = ClientMessage, from_version = 1, until_version = 2)]
-struct AddedAndRemovedMessage {
+pub struct AddedAndRemovedMessage {
     field_a: u8,
 }
 

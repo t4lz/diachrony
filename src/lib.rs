@@ -77,7 +77,7 @@ pub fn current_version(arg: TokenStream) -> TokenStream {
 /// current_version!(2);
 ///
 /// #[message(group = IncomingMessage, from_version = 1)]
-/// struct MyMessage {
+/// pub struct MyMessage {
 ///     field_a: u8,
 ///     #[field(from_version=2)]
 ///     field_b: u8
@@ -294,10 +294,8 @@ pub fn message_group(args: TokenStream) -> TokenStream {
             .iter()
             .map(|message_name| format_ident!("{message_name}V{version}"));
         let message_group_enum = quote! {
-            enum #enum_name { // set the struct to public
-                #(#variants(#message_names)
-
-                ),*
+            pub enum #enum_name { // set the struct to public
+                #(#variants(#message_names)),*
             }
         };
         println!("generated enum: {}", message_group_enum.to_string());
