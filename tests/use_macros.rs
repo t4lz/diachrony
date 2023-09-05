@@ -1,4 +1,4 @@
-use diachrony::{current_version, message, message_group};
+use diachrony::{current_version, handle, handler, handler_struct, message, message_group};
 
 current_version!(4);
 
@@ -25,6 +25,25 @@ pub struct AddedAndRemovedMessage {
 }
 
 message_group!(ClientMessage);
+
+#[handler_struct]
+struct MessageHandler {
+    state1: u8,
+    state2: bool,
+}
+
+#[handler(ClientMessage)]
+impl MessageHandler {
+    #[handle(from_version = 0)]
+    fn handle_added_field_v0(&self, message: AddedField) {}
+
+    #[handle(from_version = 0)]
+    fn handle_added_field_v1(&self, message: AddedField) {}
+}
+
+// let handler = MessageHandler<T>::default();
+// let client_message: T = get_next_message<T>();
+// handler.handle(client_message);
 
 #[test]
 fn construct() {

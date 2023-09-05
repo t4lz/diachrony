@@ -8,8 +8,13 @@ use darling::{Error, FromAttributes, FromMeta};
 use macro_state::*;
 use quote::{format_ident, quote, ToTokens};
 use syn::punctuated::Punctuated;
+use syn::token::{Gt, Lt};
 use syn::Expr::Path;
-use syn::{parse_macro_input, Attribute, Expr, ExprLit, Field, Fields, Ident, ItemStruct, Token};
+use syn::{
+    parse_macro_input, AngleBracketedGenericArguments, Attribute, Expr, ExprLit, Field,
+    FieldMutability, Fields, GenericArgument, GenericParam, Generics, Ident, ItemImpl, ItemStruct,
+    PathArguments, Token, Type, TypeParam, TypePath, Visibility,
+};
 
 const VERSION_KEY: &str = "diachrony-protocol-version";
 /// Prefix for the key of the state keeping all the messages removed in a version.
@@ -254,6 +259,13 @@ pub fn field(args: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+fn get_current_version() -> u16 {
+    proc_read_state(VERSION_KEY)
+        .expect("current_version!() not set")
+        .parse::<u16>()
+        .expect("Couldn't parse current version to int")
+}
+
 #[proc_macro]
 pub fn message_group(args: TokenStream) -> TokenStream {
     let items = parse_macro_input!(args with Punctuated<Expr, Token![,]>::parse_terminated);
@@ -265,12 +277,8 @@ pub fn message_group(args: TokenStream) -> TokenStream {
     };
     let group_name = group_name.path.get_ident().unwrap().to_string(); // TODO: unwrap
 
-    // let mut version_enums = Vec::with_capacity((to_version - from_version) as usize);
     let mut version_enums = Vec::new();
-    let current_version = proc_read_state(VERSION_KEY)
-        .expect("current_version!() not set")
-        .parse::<u16>()
-        .expect("Couldn't parse current version to int");
+    let current_version = get_current_version();
 
     let mut message_types = BTreeSet::new();
 
@@ -304,4 +312,134 @@ pub fn message_group(args: TokenStream) -> TokenStream {
         version_enums.push(group_enum);
     }
     TokenStream::from_iter(version_enums)
+}
+
+#[proc_macro_attribute]
+pub fn handler_struct(_: TokenStream, struct_def: TokenStream) -> TokenStream {
+    let mut struct_def = parse_macro_input!(struct_def as ItemStruct);
+    if struct_def.generics.lt_token.is_none() {
+        struct_def.generics = Generics {
+            lt_token: Some(Lt::default()),
+            params: Default::default(),
+            gt_token: Some(Gt::default()),
+            where_clause: None,
+        }
+    }
+    let available_param_name =
+        struct_def
+            .generics
+            .params
+            .iter()
+            .fold("T".to_string(), |acc, param| {
+                if let GenericParam::Type(param) = param {
+                    acc + param.ident.to_string().as_str()
+                } else {
+                    acc
+                }
+            });
+
+    // Add new generic type parameter to struct.
+    struct_def
+        .generics
+        .params
+        .push(GenericParam::Type(TypeParam {
+            attrs: vec![],
+            ident: format_ident!("{available_param_name}"),
+            colon_token: None,
+            bounds: Default::default(),
+            eq_token: None,
+            default: None,
+        }));
+
+    let Fields::Named(ref mut fields_named) = struct_def.fields else {
+        panic!("Expected handler struct to be a struct with named fields")
+    };
+    let phantom_type = format!("std::marker::PhantomData<{available_param_name}>");
+    fields_named.named.push(Field {
+        attrs: vec![],
+        vis: Visibility::Inherited,
+        mutability: FieldMutability::None,
+        ident: Some(format_ident!("message_type")),
+        colon_token: None,
+        ty: Type::Path(TypePath::from_string(&phantom_type).unwrap()),
+    });
+
+    struct_def.into_token_stream().into()
+}
+
+// Change MyHandler to MyHandlerV0 (, ...V1, ...).
+fn versionize_path(path: &mut syn::Path, version: u16) {
+    let last_segment = path.segments.last_mut().unwrap();
+    let last_ident = &last_segment.ident;
+    last_segment.ident = format_ident!("{last_ident}V{version}");
+}
+
+fn get_type_path(impl_block: &mut ItemImpl) -> &mut TypePath {
+    if let Type::Path(ref mut type_path) = *impl_block.self_ty {
+        return type_path;
+    };
+    panic!("Unexpected handler type. Expected a type path.")
+}
+
+fn get_path_arguments(impl_block: &mut ItemImpl) -> &mut PathArguments {
+    &mut get_type_path(impl_block)
+        .path
+        .segments
+        .last_mut()
+        .unwrap()
+        .arguments
+}
+
+fn make_generic_arg_from_path(path: syn::Path) -> GenericArgument {
+    GenericArgument::Type(Type::Path(TypePath { qself: None, path }))
+}
+
+#[proc_macro_attribute]
+pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
+    let mut message_group_path = parse_macro_input!(args as syn::Path);
+    let mut impl_block = parse_macro_input!(impl_block as ItemImpl);
+    let message_group_generic_arg = make_generic_arg_from_path(message_group_path.clone());
+
+    let generic_arguments = get_path_arguments(&mut impl_block);
+    match generic_arguments {
+        PathArguments::None => {
+            let mut args = Punctuated::new();
+            args.push(message_group_generic_arg);
+            *generic_arguments = PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+                colon2_token: None,
+                lt_token: Default::default(),
+                args,
+                gt_token: Default::default(),
+            });
+        }
+        PathArguments::AngleBracketed(generic_args) => {
+            generic_args.args.push(message_group_generic_arg)
+        }
+        PathArguments::Parenthesized(_) => {
+            panic!("Unexpected")
+        }
+    }
+
+    let current_version = get_current_version();
+
+    let mut handler_impls: Vec<TokenStream> = Vec::with_capacity(current_version as usize);
+
+    for version in 0..=current_version {
+        let mut impl_block = impl_block.clone();
+        let args = get_path_arguments(&mut impl_block);
+        let PathArguments::AngleBracketed(generic_args) = args else {
+            unreachable!() // We set it before the loop.
+        };
+        let Some(GenericArgument::Type(Type::Path(type_path))) = generic_args.args.last_mut() else {
+            unreachable!() // We push it before the loop.
+        };
+        versionize_path(&mut type_path.path, version);
+        handler_impls.push(impl_block.into_token_stream().into());
+    }
+    TokenStream::from_iter(handler_impls)
+}
+
+#[proc_macro_attribute]
+pub fn handle(_args: TokenStream, func: TokenStream) -> TokenStream {
+    func
 }
