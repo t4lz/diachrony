@@ -12,8 +12,8 @@ use syn::token::{Gt, Lt};
 use syn::Expr::Path;
 use syn::{
     parse_macro_input, AngleBracketedGenericArguments, Attribute, Expr, ExprLit, Field,
-    FieldMutability, Fields, GenericArgument, GenericParam, Generics, Ident, ItemImpl, ItemStruct,
-    PathArguments, Token, Type, TypeParam, TypePath, Visibility,
+    FieldMutability, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem,
+    ItemImpl, ItemStruct, Pat, PathArguments, Token, Type, TypeParam, TypePath, Visibility,
 };
 
 const VERSION_KEY: &str = "diachrony-protocol-version";
@@ -421,6 +421,38 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
     }
 
     let current_version = get_current_version();
+    let mut funcs: Vec<Vec<ImplItem>> = vec![Vec::new(); current_version as usize + 1];
+
+    impl_block.items = impl_block
+        .items
+        .into_iter()
+        .filter(|item| {
+            if let ImplItem::Fn(func) = item {
+                if let Some(macro_args) = func.attrs.iter().find_map(|attr| {
+                    attr.path()
+                        .is_ident("handle") // TODO: deal a path like diachrony::handle
+                        .then(|| FieldMacroArgs::from_meta(&attr.meta).unwrap())
+                }) {
+                    let from = macro_args.from_version.unwrap_or(0);
+                    let until = macro_args
+                        .until_version
+                        .map(|v| std::cmp::min(v, current_version + 1))
+                        .unwrap_or(current_version + 1);
+
+                    println!("macro args: {macro_args:?}, from: {from}, until: {until}");
+
+                    for v in from..until {
+                        let mut func_ver = item.clone();
+                        versionize_func_attr(&mut func_ver, v);
+                        funcs[v as usize].push(func_ver);
+                    }
+                }
+                false // remove all functions from impl_block;
+            } else {
+                true
+            }
+        })
+        .collect();
 
     let mut handler_impls: Vec<TokenStream> = Vec::with_capacity(current_version as usize);
 
@@ -434,9 +466,30 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
             unreachable!() // We push it before the loop.
         };
         versionize_path(&mut type_path.path, version);
+        // TODO: eliminate the cloning here, use a collection that allows moving out for `funcs`.
+        impl_block.items.extend(funcs[version as usize].clone());
         handler_impls.push(impl_block.into_token_stream().into());
     }
     TokenStream::from_iter(handler_impls)
+}
+
+fn versionize_func_attr(func: &mut ImplItem, version: u16) {
+    let ImplItem::Fn(func) = func else {
+        unreachable!()
+    };
+    for arg in func.sig.inputs.iter_mut() {
+        if let FnArg::Typed(arg) = arg {
+            if let Pat::Ident(ident) = arg.pat.as_ref() {
+                // TODO: this is a convenient but obscure interface.
+                if ident.ident.to_string() == "message".to_string() {
+                    let Type::Path(path) = arg.ty.as_mut() else {
+                        panic!("Expected simple path type for message argument for handler")
+                    };
+                    versionize_path(&mut path.path, version);
+                }
+            }
+        }
+    }
 }
 
 #[proc_macro_attribute]

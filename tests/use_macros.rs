@@ -34,10 +34,10 @@ struct MessageHandler {
 
 #[handler(ClientMessage)]
 impl MessageHandler {
-    #[handle(from_version = 0)]
+    #[handle(from_version = 0, until_version = 1)]
     fn handle_added_field_v0(&self, message: AddedField) {}
 
-    #[handle(from_version = 0)]
+    #[handle(from_version = 1)]
     fn handle_added_field_v1(&self, message: AddedField) {}
 }
 
