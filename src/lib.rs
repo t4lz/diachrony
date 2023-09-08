@@ -9,11 +9,10 @@ use macro_state::*;
 use quote::{format_ident, quote, ToTokens};
 use syn::punctuated::Punctuated;
 use syn::token::{Gt, Lt};
-use syn::Expr::Path;
 use syn::{
     parse_macro_input, AngleBracketedGenericArguments, Attribute, Expr, ExprLit, Field,
     FieldMutability, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem,
-    ItemImpl, ItemStruct, Pat, PathArguments, Token, Type, TypeParam, TypePath, Visibility,
+    ItemImpl, ItemStruct, PathArguments, Token, Type, TypeParam, TypePath, Visibility,
 };
 
 const VERSION_KEY: &str = "diachrony-protocol-version";
@@ -271,7 +270,7 @@ pub fn message_group(args: TokenStream) -> TokenStream {
     let items = parse_macro_input!(args with Punctuated<Expr, Token![,]>::parse_terminated);
     let mut exprs = items.iter();
     let group_name = exprs.next().unwrap(); // TODO: unwrap
-    let Path(group_name) = group_name else {
+    let Expr::Path(group_name) = group_name else {
         // TODO: panic?
         panic!("First argument of message_group! should be the group name (enum name).")
     };
@@ -396,7 +395,7 @@ fn make_generic_arg_from_path(path: syn::Path) -> GenericArgument {
 
 #[proc_macro_attribute]
 pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
-    let mut message_group_path = parse_macro_input!(args as syn::Path);
+    let message_group_path = parse_macro_input!(args as syn::Path);
     let mut impl_block = parse_macro_input!(impl_block as ItemImpl);
     let message_group_generic_arg = make_generic_arg_from_path(message_group_path.clone());
 
@@ -422,6 +421,8 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
 
     let current_version = get_current_version();
     let mut funcs: Vec<Vec<ImplItem>> = vec![Vec::new(); current_version as usize + 1];
+    let mut func_names: Vec<Vec<Ident>> = vec![Vec::new(); current_version as usize + 1];
+    let mut variants: Vec<Vec<syn::Path>> = vec![Vec::new(); current_version as usize + 1];
 
     impl_block.items = impl_block
         .items
@@ -443,8 +444,11 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
 
                     for v in from..until {
                         let mut func_ver = item.clone();
-                        versionize_func_attr(&mut func_ver, v);
-                        funcs[v as usize].push(func_ver);
+                        let func_arg_type = get_func_arg_type_path(&mut func_ver);
+                        variants[v as usize].push(func_arg_type.clone()); // E.g. MyMessage
+                        versionize_path(func_arg_type, v);
+                        funcs[v as usize].push(func_ver); // E.g. MyMessageV1
+                        func_names[v as usize].push(func.sig.ident.clone());
                     }
                 }
                 false // remove all functions from impl_block;
@@ -466,6 +470,13 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
             unreachable!() // We push it before the loop.
         };
         versionize_path(&mut type_path.path, version);
+        impl_block.items.push(make_general_handle_function(
+            message_group_path.clone(),
+            &func_names[version as usize],
+            &variants[version as usize],
+            version,
+        ));
+
         // TODO: eliminate the cloning here, use a collection that allows moving out for `funcs`.
         impl_block.items.extend(funcs[version as usize].clone());
         handler_impls.push(impl_block.into_token_stream().into());
@@ -473,23 +484,39 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
     TokenStream::from_iter(handler_impls)
 }
 
-fn versionize_func_attr(func: &mut ImplItem, version: u16) {
+/// Create the `handle` function that gets an enum object, matches it and calls the appropriate function.
+fn make_general_handle_function(
+    mut enum_path: syn::Path,
+    func_names: &Vec<Ident>,
+    variants: &Vec<syn::Path>,
+    version: u16,
+) -> ImplItem {
+    versionize_path(&mut enum_path, version);
+    // TODO: pub?
+    let token_stream = quote!(
+        pub fn handle(&self, message: #enum_path) {
+            match message {
+                #(#enum_path::#variants(exact_message) => self.#func_names(exact_message)),*
+            }
+        }
+    )
+    .into();
+    syn::parse(token_stream).unwrap()
+}
+
+fn get_func_arg_type_path(func: &mut ImplItem) -> &mut syn::Path {
     let ImplItem::Fn(func) = func else {
         unreachable!()
     };
     for arg in func.sig.inputs.iter_mut() {
         if let FnArg::Typed(arg) = arg {
-            if let Pat::Ident(ident) = arg.pat.as_ref() {
-                // TODO: this is a convenient but obscure interface.
-                if ident.ident.to_string() == "message".to_string() {
-                    let Type::Path(path) = arg.ty.as_mut() else {
-                        panic!("Expected simple path type for message argument for handler")
-                    };
-                    versionize_path(&mut path.path, version);
-                }
-            }
+            let Type::Path(path) = arg.ty.as_mut() else {
+                panic!("Expected simple path type for message argument for handler")
+            };
+            return &mut path.path;
         }
     }
+    panic!("No message argument found for handler function.");
 }
 
 #[proc_macro_attribute]

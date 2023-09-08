@@ -3,31 +3,33 @@ use diachrony::{current_version, handle, handler, handler_struct, message, messa
 current_version!(4);
 
 #[message(group = ClientMessage, from_version = 0)]
+#[derive(Debug)]
 pub struct AddedField {
-    field_a: u8,
+    pub field_a: u8,
     #[field(from_version = 1)]
-    field_b: u8,
+    pub field_b: u8,
 }
 
 #[message(group = ClientMessage, from_version = 1)]
 pub struct AddedMessage {
-    field_a: u8,
+    pub field_a: u8,
 }
 
 #[message(group = ClientMessage, from_version = 0, until_version = 2)]
 pub struct RemovedMessage {
-    field_a: u8,
+    pub field_a: u8,
 }
 
 #[message(group = ClientMessage, from_version = 1, until_version = 2)]
 pub struct AddedAndRemovedMessage {
-    field_a: u8,
+    pub field_a: u8,
 }
 
 message_group!(ClientMessage);
 
 #[handler_struct]
-struct MessageHandler {
+#[derive(Default)]
+pub struct MessageHandler {
     state1: u8,
     state2: bool,
 }
@@ -35,15 +37,17 @@ struct MessageHandler {
 #[handler(ClientMessage)]
 impl MessageHandler {
     #[handle(from_version = 0, until_version = 1)]
-    fn handle_added_field_v0(&self, message: AddedField) {}
+    fn handle_added_field_v0(&self, message: AddedField) {
+        println!("v0 handler");
+        println!("message: {message:?}");
+    }
 
     #[handle(from_version = 1)]
-    fn handle_added_field_v1(&self, message: AddedField) {}
+    fn handle_added_field_v1(&self, message: AddedField) {
+        println!("v1 handler");
+        println!("message: {message:?}");
+    }
 }
-
-// let handler = MessageHandler<T>::default();
-// let client_message: T = get_next_message<T>();
-// handler.handle(client_message);
 
 #[test]
 fn construct() {
@@ -55,4 +59,9 @@ fn construct() {
     };
     let am = AddedMessageV1 { field_a: 0 };
     let am = RemovedMessageV0 { field_a: 0 };
+
+    // ???
+    // let handler = MessageHandler::default();
+    // let client_message: T = get_next_message<T>();
+    // handler.handle(client_message);
 }
