@@ -96,8 +96,6 @@ pub fn current_version(arg: TokenStream) -> TokenStream {
 /// `IncomingMessageV1` enum and a `MyMessage(MyMessage2)` to the `IncomingMessageV2` Enum.
 #[proc_macro_attribute]
 pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
-    println!("attr: \"{}\"", args.to_string());
-    println!("item: \"{}\"", item.to_string());
     let mut message_struct = parse_macro_input!(item as ItemStruct);
 
     let attr_args = match NestedMeta::parse_meta_list(args.into()) {
@@ -121,7 +119,6 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
     let name = message_struct.ident.to_string();
 
     'fields: for field in fields {
-        println!("processing field {:?}", field.clone().ident.unwrap()); // TODO: remove
         for (i, field_attr) in field.attrs.iter().enumerate() {
             // TODO: is_ident is not good, because we also want to match diachrony::field (and we
             //  don't want to match `field` if it's not imported form diachrony.
@@ -141,20 +138,14 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
                     removed_fields.insert(field.clone());
                 }
                 if let Some(from_version) = field_args.from_version {
-                    println!("from_version: {from_version}");
                     // TODO: verify that the from_version of this field is higher than the
                     //  from_version of the message (if there).
                     let version_change = version_changes.entry(from_version).or_default();
                     let VersionChange { new_fields, .. } = version_change;
                     new_fields.insert(field);
-                    println!(
-                        "inserted field into version change. Version change: {:?}",
-                        version_changes.get(&from_version).unwrap()
-                    );
                 } else {
                     message_fields.insert(field.clone());
                 }
-                println!("field_args: {field_args:#?}");
                 continue 'fields;
             }
         }
@@ -174,7 +165,6 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
 
     for (version, version_change) in version_changes {
         generate_aliases(&mut struct_versions, &name, last_version, version);
-        println!("generating version {version}"); // TODO: delete.
         message_fields = &message_fields - &version_change.removed_fields;
         message_fields = message_fields
             .union(&version_change.new_fields)
@@ -254,9 +244,7 @@ fn make_struct_version(
 }
 
 #[proc_macro_attribute]
-pub fn field(args: TokenStream, item: TokenStream) -> TokenStream {
-    println!("attr: \"{}\"", args.to_string());
-    println!("item: \"{}\"", item.to_string());
+pub fn field(_args: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
@@ -315,7 +303,6 @@ pub fn message_group(args: TokenStream) -> TokenStream {
                 #(#variants(#message_names)),*
             }
         };
-        println!("generated enum: {}", message_group_enum.to_string());
         // convert from proc_macro2 TokenStream to standard TokenStream.
         let group_enum = TokenStream::from(message_group_enum.into_token_stream());
         version_enums.push(group_enum);
@@ -461,8 +448,6 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
                         .until_version
                         .map(|v| std::cmp::min(v, current_version + 1))
                         .unwrap_or(current_version + 1);
-
-                    println!("macro args: {macro_args:?}, from: {from}, until: {until}");
 
                     for v in from..until {
                         let mut func_ver = item.clone();
