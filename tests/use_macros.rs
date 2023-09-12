@@ -1,4 +1,7 @@
-use diachrony::{current_version, handle, handler, handler_struct, message, message_group};
+use diachrony::{
+    current_version, handle, handler, handler_struct, message, message_group, version_dispatch,
+};
+use std::net::TcpStream;
 
 current_version!(4);
 
@@ -11,16 +14,19 @@ pub struct AddedField {
 }
 
 #[message(group = ClientMessage, from_version = 1)]
+#[derive(Debug)]
 pub struct AddedMessage {
     pub field_a: u8,
 }
 
 #[message(group = ClientMessage, from_version = 0, until_version = 2)]
+#[derive(Debug)]
 pub struct RemovedMessage {
     pub field_a: u8,
 }
 
 #[message(group = ClientMessage, from_version = 1, until_version = 2)]
+#[derive(Debug)]
 pub struct AddedAndRemovedMessage {
     pub field_a: u8,
 }
@@ -28,7 +34,6 @@ pub struct AddedAndRemovedMessage {
 message_group!(ClientMessage);
 
 #[handler_struct]
-#[derive(Default)]
 pub struct MessageHandler {
     state1: u8,
     state2: bool,
@@ -47,21 +52,44 @@ impl MessageHandler {
         println!("v1 handler");
         println!("message: {message:?}");
     }
+
+    #[handle(from_version = 1)]
+    fn handle_added_added_message_v1(&self, message: AddedMessage) {
+        println!("v1 handler");
+        println!("message: {message:?}");
+    }
+
+    #[handle(from_version = 0, until_version = 2)]
+    fn handle_removed_message(&self, message: RemovedMessage) {
+        println!("v0 handler");
+        println!("message: {message:?}");
+    }
+
+    #[handle(from_version = 1, until_version = 2)]
+    fn handle_added_and_removed_message(&self, message: AddedAndRemovedMessage) {
+        println!("v1 handler");
+        println!("message: {message:?}");
+    }
+}
+
+impl<T> Default for MessageHandler<T> {
+    fn default() -> Self {
+        Self {
+            state1: Default::default(),
+            state2: Default::default(),
+            message_type: Default::default(),
+        }
+    }
+}
+
+#[version_dispatch]
+pub fn wrap_raw_connection<ClientMessage: HandleWith>(stream: TcpStream) {
+    let handler = <ClientMessage as HandleWith>::Handler::default();
+    let client_message: ClientMessage = todo!();
+    client_message.handle_with(handler);
 }
 
 #[test]
 fn construct() {
-    // TODO: don't use generated version structs.
-    let af = AddedFieldV0 { field_a: 0 };
-    let af = AddedFieldV1 {
-        field_a: 0,
-        field_b: 42,
-    };
-    let am = AddedMessageV1 { field_a: 0 };
-    let am = RemovedMessageV0 { field_a: 0 };
-
-    // ???
-    // let handler = MessageHandler::default();
-    // let client_message: T = get_next_message<T>();
-    // handler.handle(client_message);
+    wrap_raw_connection(1, todo!());
 }
