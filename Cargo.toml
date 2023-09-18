@@ -1,16 +1,6 @@
-[package]
-name = "diachrony"
-version = "0.1.0"
-edition = "2021"
+[workspace]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[lib]
-proc-macro = true
-
-[dependencies]
-proc-macro2 = "1"
-quote = "1"
-syn = {version = "2", features = ["full"] }
-darling = "0.20"
-macro_state = "0.2.0"
+members = [
+    "macros",
+    "diachrony"
+]

@@ -1,7 +1,8 @@
 extern crate macro_state;
 
 use proc_macro::TokenStream;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ops::RangeInclusive;
 
 use darling::ast::NestedMeta;
 use darling::{Error, FromAttributes, FromMeta};
@@ -12,8 +13,8 @@ use syn::token::{Gt, Lt};
 use syn::{
     parse_macro_input, AngleBracketedGenericArguments, Attribute, Block, Expr, ExprLit, Field,
     FieldMutability, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem,
-    ImplItemType, ItemFn, ItemImpl, ItemStruct, Pat, PatIdent, PatType, PathArguments, PathSegment,
-    Token, Type, TypeParam, TypePath, Visibility,
+    ImplItemType, ItemEnum, ItemFn, ItemImpl, ItemStruct, Pat, PatIdent, PatType, Path,
+    PathArguments, PathSegment, Token, Type, TypeParam, TypePath, Variant, Visibility,
 };
 
 const VERSION_KEY: &str = "diachrony-protocol-version";
@@ -39,6 +40,13 @@ struct MessageMacroArgs {
 
 #[derive(Debug, FromMeta, Default)]
 struct FieldMacroArgs {
+    from_version: Option<u16>,
+    until_version: Option<u16>,
+}
+
+#[derive(Debug, FromMeta)]
+struct SuperGroupMacroArgs {
+    handler: Ident,
     from_version: Option<u16>,
     until_version: Option<u16>,
 }
@@ -98,18 +106,9 @@ pub fn current_version(arg: TokenStream) -> TokenStream {
 pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
     let mut message_struct = parse_macro_input!(item as ItemStruct);
 
-    let attr_args = match NestedMeta::parse_meta_list(args.into()) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(Error::from(e).write_errors());
-        }
-    };
-
-    let args = match MessageMacroArgs::from_list(&attr_args) {
-        Ok(v) => v,
-        Err(e) => {
-            return TokenStream::from(e.write_errors());
-        }
+    let args = match parse_macro_args::<MessageMacroArgs>(args) {
+        Ok(args) => args,
+        Err(error_token_stream) => return error_token_stream,
     };
 
     let mut version_changes = BTreeMap::new();
@@ -248,6 +247,11 @@ pub fn field(_args: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+#[proc_macro_attribute]
+pub fn group(_args: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 fn get_current_version() -> u16 {
     proc_read_state(VERSION_KEY)
         .expect("current_version!() not set")
@@ -255,16 +259,121 @@ fn get_current_version() -> u16 {
         .expect("Couldn't parse current version to int")
 }
 
-#[proc_macro]
-pub fn message_group(args: TokenStream) -> TokenStream {
-    let items = parse_macro_input!(args with Punctuated<Expr, Token![,]>::parse_terminated);
-    let mut exprs = items.iter();
-    let group_name = exprs.next().unwrap(); // TODO: unwrap
-    let Expr::Path(group_name) = group_name else {
-        // TODO: panic?
-        panic!("First argument of message_group! should be the group name (enum name).")
+fn parse_macro_args<A: FromMeta>(args: TokenStream) -> Result<A, TokenStream> {
+    let attr_args = NestedMeta::parse_meta_list(args.into())
+        .map_err(|e| TokenStream::from(Error::from(e).write_errors()))?;
+
+    A::from_list(&attr_args).map_err(|e| TokenStream::from(e.write_errors()))
+}
+
+fn parse_attr_args<'a, T, A>(mut attrs: A, attr_name: &str) -> Option<T>
+where
+    T: FromMeta,
+    A: Iterator<Item = &'a Attribute>,
+{
+    attrs.find_map(|attr| {
+        attr.path()
+            .is_ident(attr_name)
+            .then(|| T::from_meta(&attr.meta).unwrap())
+    })
+}
+
+#[proc_macro_attribute]
+pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args = match parse_macro_args::<SuperGroupMacroArgs>(args) {
+        Ok(args) => args,
+        Err(error_token_stream) => return error_token_stream,
     };
-    let group_name_ident = group_name.path.get_ident().unwrap(); // TODO: unwrap
+    let current_version = get_current_version();
+    let super_group_version_range =
+        get_version_range(args.from_version, args.until_version, current_version);
+
+    let super_group_enum = parse_macro_input!(item as ItemEnum);
+
+    let mut handlers = Vec::with_capacity(super_group_enum.variants.len());
+
+    let mut present_variants = HashSet::with_capacity(super_group_enum.variants.len());
+    let mut new_variants: HashMap<u16, HashSet<Variant>> =
+        HashMap::with_capacity(super_group_version_range.len());
+    let mut removed_variants: HashMap<u16, HashSet<Variant>> =
+        HashMap::with_capacity(super_group_version_range.len());
+
+    let mut output_items =
+        Vec::with_capacity(super_group_enum.variants.len() + super_group_version_range.len() + 1);
+    for variant in super_group_enum.variants.iter() {
+        let args: SuperGroupMacroArgs = parse_attr_args(variant.attrs.iter(), "group").unwrap();
+        output_items.push(make_message_group(
+            &variant.ident,
+            args.from_version,
+            args.until_version,
+        ));
+        if let Some(v) = args.from_version {
+            new_variants.entry(v).or_default().insert(variant.clone());
+        } else {
+            // Variant that don't have `from_version` and is therefore present in first version.
+            present_variants.insert(variant.to_owned());
+        }
+        if let Some(v) = args.until_version {
+            removed_variants
+                .entry(v)
+                .or_default()
+                .insert(variant.clone());
+        }
+        handlers.push(args.handler);
+    }
+
+    for version in super_group_version_range {
+        let mut next_version = super_group_enum.clone();
+        if let Some(removed) = removed_variants.get(&version) {
+            present_variants = &present_variants - removed;
+        }
+        if let Some(added) = new_variants.remove(&version) {
+            present_variants.extend(added.into_iter());
+        }
+        next_version.variants = Punctuated::from_iter(present_variants.clone());
+
+        versionize_super_group(&mut next_version, version);
+        output_items.push(next_version.into_token_stream().into());
+    }
+
+    TokenStream::from_iter(output_items)
+}
+
+fn versionize_ident(ident: &mut Ident, version: u16) {
+    *ident = format_ident!("{}V{version}", ident);
+}
+
+fn versionize_super_group(super_group_enum: &mut ItemEnum, version: u16) {
+    versionize_ident(&mut super_group_enum.ident, version);
+    super_group_enum.variants.iter_mut().for_each(|variant| {
+        versionize_ident(&mut variant.ident, version);
+        let Fields::Unnamed(ref mut unnamed_fields) = variant.fields else {
+            panic!("Expected tuple variant for message group {} under super group {}.", variant.ident.to_string(), super_group_enum.ident.to_string());
+        };
+        let variant_field_type = &mut unnamed_fields.unnamed
+            .first_mut()
+            .unwrap_or_else(|| panic!("Missing unnamed field for tuple variant {} of super group enum {}.", variant.ident.to_string(), super_group_enum.ident.to_string()))
+            .ty;
+        versionize_type(variant_field_type, version);
+    })
+}
+
+fn get_version_range(
+    from_version: Option<u16>,
+    until_version: Option<u16>,
+    current_version: u16,
+) -> RangeInclusive<u16> {
+    from_version.unwrap_or_default()
+        ..=until_version
+            .map(|v| std::cmp::min(v - 1, current_version))
+            .unwrap_or(current_version)
+}
+
+fn make_message_group(
+    group_name_ident: &Ident,
+    from_version: Option<u16>,
+    until_version: Option<u16>,
+) -> TokenStream {
     let group_name = group_name_ident.to_string();
 
     let mut version_enums = Vec::new();
@@ -279,7 +388,7 @@ pub fn message_group(args: TokenStream) -> TokenStream {
     .into();
     version_enums.push(group_trait);
 
-    for version in 0..=current_version {
+    for version in get_version_range(from_version, until_version, current_version) {
         let added_messages_key = format!("{ADDED_MESSAGES_PREFIX}-{group_name}-{version}");
         let new_messages_in_this_version = proc_read_state_vec(&added_messages_key);
         let removed_messages_key = format!("{REMOVED_MESSAGES_PREFIX}-{group_name}-{version}");
@@ -308,6 +417,19 @@ pub fn message_group(args: TokenStream) -> TokenStream {
         version_enums.push(group_enum);
     }
     TokenStream::from_iter(version_enums)
+}
+
+#[proc_macro]
+pub fn message_group(args: TokenStream) -> TokenStream {
+    let items = parse_macro_input!(args with Punctuated<Expr, Token![,]>::parse_terminated);
+    let mut exprs = items.iter();
+    let group_name = exprs.next().unwrap(); // TODO: unwrap
+    let Expr::Path(group_name) = group_name else {
+        // TODO: panic?
+        panic!("First argument of message_group! should be the group name (enum name).")
+    };
+    let group_name_ident = group_name.path.get_ident().unwrap(); // TODO: unwrap
+    make_message_group(group_name_ident, None, None)
 }
 
 #[proc_macro_attribute]
@@ -370,15 +492,23 @@ fn versionize_path(path: &mut syn::Path, version: u16) {
     last_segment.ident = format_ident!("{last_ident}V{version}");
 }
 
-fn get_type_path(impl_block: &mut ItemImpl) -> &mut TypePath {
-    if let Type::Path(ref mut type_path) = *impl_block.self_ty {
-        return type_path;
+fn versionize_type(ty: &mut Type, version: u16) {
+    versionize_path(&mut get_type_path(ty).path, version)
+}
+
+fn get_impl_type_path(impl_block: &mut ItemImpl) -> &mut TypePath {
+    get_type_path(impl_block.self_ty.as_mut())
+}
+
+fn get_type_path(ty: &mut Type) -> &mut TypePath {
+    let Type::Path(ref mut type_path) = ty else {
+        panic!("Expected a type path, got {}.", ty.into_token_stream().to_string());
     };
-    panic!("Unexpected handler type. Expected a type path.")
+    return type_path;
 }
 
 fn get_path_arguments(impl_block: &mut ItemImpl) -> &mut PathArguments {
-    &mut get_type_path(impl_block)
+    &mut get_impl_type_path(impl_block)
         .path
         .segments
         .last_mut()
@@ -406,7 +536,7 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
     let message_group_path = parse_macro_input!(args as syn::Path);
     let mut impl_block = parse_macro_input!(impl_block as ItemImpl);
     let message_group_generic_arg = make_generic_arg_from_path(message_group_path.clone());
-    let handler_name = get_type_path(&mut impl_block).to_owned();
+    let handler_name = get_impl_type_path(&mut impl_block).to_owned();
 
     let generic_arguments = get_path_arguments(&mut impl_block);
     match generic_arguments {
@@ -468,25 +598,6 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
     // TODO: code was changed, so recalculate capacity.
     let mut handler_impls: Vec<TokenStream> = Vec::with_capacity(current_version as usize);
 
-    // Trait that has to be implemented for all message group versions.
-    // TODO: probably just export those 2 traits and not generate them in a macro.
-    let handle_with_trait = quote! {
-        trait HandleWith: Sized {
-            type Handler: HandleMessage<Message=Self>;
-            fn handle_with(self, handler: Self::Handler) {
-                handler.handle(self)
-            }
-        }
-    };
-    let message_handler_trait = quote! {
-        trait HandleMessage: Default {
-            type Message;
-            fn handle(&self, m: Self::Message);
-        }
-    };
-    handler_impls.push(handle_with_trait.into_token_stream().into());
-    handler_impls.push(message_handler_trait.into_token_stream().into());
-
     for version in 0..=current_version {
         let mut impl_block = impl_block.clone();
         let mut message_handler_trait_impl = impl_block.clone();
@@ -496,10 +607,16 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
             let type_path = get_gen_arg_type_path(&mut message_handler_trait_impl);
             versionize_path(&mut type_path.path, version);
         }
-        let segments = Punctuated::from_iter(vec![PathSegment {
-            ident: format_ident!("HandleMessage"),
-            arguments: Default::default(),
-        }]);
+        let segments = Punctuated::from_iter(vec![
+            PathSegment {
+                ident: format_ident!("diachrony"),
+                arguments: Default::default(),
+            },
+            PathSegment {
+                ident: format_ident!("HandleMessage"),
+                arguments: Default::default(),
+            },
+        ]);
         message_handler_trait_impl.trait_ = Some((
             None,
             syn::Path {
@@ -537,7 +654,7 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
         handler_impls.push(message_handler_trait_impl.into_token_stream().into());
 
         let handle_with_impl_for_version = quote! {
-            impl HandleWith for #type_path {
+            impl diachrony::HandleWith for #type_path {
                 type Handler = #handler_name<#type_path>;
             }
         };
