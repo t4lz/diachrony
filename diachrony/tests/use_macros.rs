@@ -31,7 +31,7 @@ pub struct AddedAndRemovedMessage {
 
 // message_group!(ExampleMessageGroup);
 
-#[message(group = SecondMessageGroup, from_version = 0)]
+#[message(group = SecondMessageGroup, from_version = 2)]
 #[derive(Debug)]
 pub struct WhateverMessage {
     pub field_a: u8,
@@ -41,7 +41,7 @@ pub struct WhateverMessage {
 // Generates a super-handler that has all the handlers and calls the appropriate handler.
 #[super_group(handler = ClientMessageSuperHandler)]
 enum ClientMessage {
-    #[group(handler = ExampleMessageHandler, from_version = 0)] // TODO: support from_version.
+    #[group(handler = ExampleMessageHandler, from_version = 0)]
     ExampleMessageGroup(ExampleMessageGroup),
     #[group(handler = SecondHandler, from_version = 2)]
     SecondMessageGroup(SecondMessageGroup),

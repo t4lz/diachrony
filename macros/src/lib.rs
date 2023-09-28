@@ -4,6 +4,7 @@ use proc_macro::TokenStream;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
 
+use convert_case::{Case, Casing};
 use darling::ast::NestedMeta;
 use darling::{Error, FromAttributes, FromMeta};
 use macro_state::*;
@@ -13,8 +14,8 @@ use syn::token::{Gt, Lt};
 use syn::{
     parse_macro_input, AngleBracketedGenericArguments, Attribute, Block, Expr, ExprLit, Field,
     FieldMutability, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem,
-    ImplItemType, ItemEnum, ItemFn, ItemImpl, ItemStruct, Pat, PatIdent, PatType, Path,
-    PathArguments, PathSegment, Token, Type, TypeParam, TypePath, Variant, Visibility,
+    ImplItemType, ItemEnum, ItemFn, ItemImpl, ItemStruct, Pat, PatIdent, PatType, PathArguments,
+    PathSegment, Token, Type, TypeParam, TypePath, Variant, Visibility,
 };
 
 const VERSION_KEY: &str = "diachrony-protocol-version";
@@ -266,15 +267,17 @@ fn parse_macro_args<A: FromMeta>(args: TokenStream) -> Result<A, TokenStream> {
     A::from_list(&attr_args).map_err(|e| TokenStream::from(e.write_errors()))
 }
 
-fn parse_attr_args<'a, T, A>(mut attrs: A, attr_name: &str) -> Option<T>
+/// Parses arguments to an attribute, and also removes that attribute.
+fn parse_attr_args<T>(attrs: &mut Vec<Attribute>, attr_name: &str) -> Option<T>
 where
     T: FromMeta,
-    A: Iterator<Item = &'a Attribute>,
 {
-    attrs.find_map(|attr| {
-        attr.path()
-            .is_ident(attr_name)
-            .then(|| T::from_meta(&attr.meta).unwrap())
+    let index = attrs
+        .iter()
+        .position(|attr| attr.path().is_ident(attr_name));
+    index.map(|index| {
+        let attr = attrs.remove(index);
+        T::from_meta(&attr.meta).unwrap()
     })
 }
 
@@ -288,55 +291,106 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
     let super_group_version_range =
         get_version_range(args.from_version, args.until_version, current_version);
 
-    let super_group_enum = parse_macro_input!(item as ItemEnum);
-
-    let mut handlers = Vec::with_capacity(super_group_enum.variants.len());
+    let mut super_group_enum = parse_macro_input!(item as ItemEnum);
 
     let mut present_variants = HashSet::with_capacity(super_group_enum.variants.len());
-    let mut new_variants: HashMap<u16, HashSet<Variant>> =
+    let mut new_variants: HashMap<u16, HashSet<(Variant, Ident)>> =
         HashMap::with_capacity(super_group_version_range.len());
-    let mut removed_variants: HashMap<u16, HashSet<Variant>> =
+    let mut removed_variants: HashMap<u16, HashSet<(Variant, Ident)>> =
         HashMap::with_capacity(super_group_version_range.len());
 
     let mut output_items =
         Vec::with_capacity(super_group_enum.variants.len() + super_group_version_range.len() + 1);
-    for variant in super_group_enum.variants.iter() {
-        let args: SuperGroupMacroArgs = parse_attr_args(variant.attrs.iter(), "group").unwrap();
+    for variant in super_group_enum.variants.iter_mut() {
+        let args: SuperGroupMacroArgs = parse_attr_args(&mut variant.attrs, "group").unwrap();
         output_items.push(make_message_group(
             &variant.ident,
             args.from_version,
             args.until_version,
         ));
         if let Some(v) = args.from_version {
-            new_variants.entry(v).or_default().insert(variant.clone());
+            new_variants
+                .entry(v)
+                .or_default()
+                .insert((variant.clone(), args.handler.clone()));
         } else {
-            // Variant that don't have `from_version` and is therefore present in first version.
-            present_variants.insert(variant.to_owned());
+            // Variant that doesn't have `from_version` and is therefore present in first version.
+            present_variants.insert((variant.to_owned(), args.handler.clone()));
         }
         if let Some(v) = args.until_version {
             removed_variants
                 .entry(v)
                 .or_default()
-                .insert(variant.clone());
+                .insert((variant.clone(), args.handler));
         }
-        handlers.push(args.handler);
     }
 
+    let super_handler_ident = args.handler;
+
     for version in super_group_version_range {
+        // Super-group enum of this version e.g. `enum ClientMessageV0 { ... }`
         let mut next_version = super_group_enum.clone();
+
+        // Update which variants (message groups) are present in this version.
         if let Some(removed) = removed_variants.get(&version) {
             present_variants = &present_variants - removed;
         }
         if let Some(added) = new_variants.remove(&version) {
             present_variants.extend(added.into_iter());
         }
-        next_version.variants = Punctuated::from_iter(present_variants.clone());
+
+        // Split into separate iters (had to keep them together for same order, but in separate
+        // iterators, for the quote!).
+        let variants = present_variants.iter().map(|tup| &tup.0);
+        let handlers = present_variants.iter().map(|tup| &tup.1);
+
+        // Field names of the super-handler, which are the handlers for the different variants
+        // (message groups).
+        let handler_fields = handlers
+            .clone()
+            .map(|handler_type| format_ident!("{}", handler_type.to_string().to_case(Case::Snake)));
+
+        next_version.variants = Punctuated::from_iter(variants.cloned()); // cloning iter, not all
+
+        let super_handler_versioned_ident = format_ident!("{super_handler_ident}V{version}");
+        // TODO: pub?
+        let struct_handler_fields = handler_fields.clone();
+        let struct_handler_field_types = handlers.cloned();
+        let super_handler = quote! {
+            pub struct #super_handler_versioned_ident {
+                #(#struct_handler_fields: #struct_handler_field_types,)*
+            }
+        };
+        output_items.push(super_handler.into_token_stream().into());
 
         versionize_super_group(&mut next_version, version);
+
+        let versionized_enum_ident = &next_version.ident;
+
+        let self_handler_fields = handler_fields.clone();
+        let match_variants = handler_fields.clone();
+        let handler_impls = quote! {
+            impl diachrony::HandleMessage for #super_handler_versioned_ident {
+                type Message = #versionized_enum_ident;
+                fn handle(&self, message: Self::Message) {
+                    match message {
+                        #(#match_variants => self.#self_handler_fields.handle(message),)*,
+                    }
+                }
+            }
+
+            impl diachrony::HandleWith for #versionized_enum_ident {
+                type Handler = #super_handler_versioned_ident;
+            }
+        };
+
+        output_items.push(handler_impls.into_token_stream().into());
         output_items.push(next_version.into_token_stream().into());
     }
 
-    TokenStream::from_iter(output_items)
+    let res = TokenStream::from_iter(output_items);
+    println!("{}", res.to_string());
+    res
 }
 
 fn versionize_ident(ident: &mut Ident, version: u16) {
