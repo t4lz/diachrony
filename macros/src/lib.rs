@@ -52,6 +52,13 @@ struct SuperGroupMacroArgs {
     until_version: Option<u16>,
 }
 
+#[derive(Debug, FromMeta)]
+struct HandlerMacroArgs {
+    message_group: syn::Path,
+    from_version: Option<u16>,
+    until_version: Option<u16>,
+}
+
 impl FromAttributes for FieldMacroArgs {
     fn from_attributes(attrs: &[Attribute]) -> darling::Result<Self> {
         Ok(attrs
@@ -374,7 +381,7 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
                 type Message = #versionized_enum_ident;
                 fn handle(&self, message: Self::Message) {
                     match message {
-                        #(#match_variants => self.#self_handler_fields.handle(message),)*,
+                        #(#match_variants => self.#self_handler_fields.handle(message),)*
                     }
                 }
             }
@@ -388,9 +395,7 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
         output_items.push(next_version.into_token_stream().into());
     }
 
-    let res = TokenStream::from_iter(output_items);
-    println!("{}", res.to_string());
-    res
+    TokenStream::from_iter(output_items)
 }
 
 fn versionize_ident(ident: &mut Ident, version: u16) {
@@ -442,7 +447,9 @@ fn make_message_group(
     .into();
     version_enums.push(group_trait);
 
-    for version in get_version_range(from_version, until_version, current_version) {
+    let version_range = get_version_range(from_version, until_version, current_version);
+
+    for version in version_range {
         let added_messages_key = format!("{ADDED_MESSAGES_PREFIX}-{group_name}-{version}");
         let new_messages_in_this_version = proc_read_state_vec(&added_messages_key);
         let removed_messages_key = format!("{REMOVED_MESSAGES_PREFIX}-{group_name}-{version}");
@@ -587,9 +594,12 @@ fn make_generic_arg_from_path(path: syn::Path) -> GenericArgument {
 
 #[proc_macro_attribute]
 pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
-    let message_group_path = parse_macro_input!(args as syn::Path);
+    let args = match parse_macro_args::<HandlerMacroArgs>(args) {
+        Ok(args) => args,
+        Err(error_token_stream) => return error_token_stream,
+    };
     let mut impl_block = parse_macro_input!(impl_block as ItemImpl);
-    let message_group_generic_arg = make_generic_arg_from_path(message_group_path.clone());
+    let message_group_generic_arg = make_generic_arg_from_path(args.message_group.clone());
     let handler_name = get_impl_type_path(&mut impl_block).to_owned();
 
     let generic_arguments = get_path_arguments(&mut impl_block);
@@ -652,7 +662,8 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
     // TODO: code was changed, so recalculate capacity.
     let mut handler_impls: Vec<TokenStream> = Vec::with_capacity(current_version as usize);
 
-    for version in 0..=current_version {
+    let version_range = get_version_range(args.from_version, args.until_version, current_version);
+    for version in version_range {
         let mut impl_block = impl_block.clone();
         let mut message_handler_trait_impl = impl_block.clone();
         let type_path = get_gen_arg_type_path(&mut impl_block);
@@ -695,7 +706,7 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
         message_handler_trait_impl
             .items
             .push(make_general_handle_function(
-                message_group_path.clone(),
+                args.message_group.clone(),
                 &func_names[version as usize],
                 &variants[version as usize],
                 version,
@@ -844,4 +855,29 @@ pub fn version_dispatch(_args: TokenStream, func: TokenStream) -> TokenStream {
         inner_func.into_token_stream().into(),
         func.into_token_stream().into(),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(None, None, 5, 0..=5)] // no limits: all versions from 0 to current.
+    #[case(Some(1), None, 5, 1..=5)] // Only `from` limit: all versions from `from` to current.
+    #[case(None, Some(2), 5, 0..=1)] // Only `until` limit: all versions from 0 to until, excl.
+    #[case(Some(1), Some(4), 5, 1..=3)] // Both `from` and `until`: versions between, excl.
+    #[case(Some(1), Some(7), 5, 1..=5)] // `until` is higher than current: versions until current.
+    #[case(Some(1), Some(6), 5, 1..=5)] // Here `until` and current both limit to 5.
+    fn version_range(
+        #[case] from_version: Option<u16>,
+        #[case] until_version: Option<u16>,
+        #[case] current_version: u16,
+        #[case] expected_range: RangeInclusive<u16>,
+    ) {
+        assert_eq!(
+            get_version_range(from_version, until_version, current_version),
+            expected_range
+        );
+    }
 }

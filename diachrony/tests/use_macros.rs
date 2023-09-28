@@ -53,7 +53,7 @@ pub struct ExampleMessageHandler {
     state2: bool,
 }
 
-#[handler(ExampleMessageGroup)]
+#[handler(message_group=ExampleMessageGroup)]
 impl ExampleMessageHandler {
     #[handle(from_version = 0, until_version = 1)]
     fn handle_added_field_v0(&self, message: AddedField) {
@@ -98,12 +98,12 @@ impl<T> Default for ExampleMessageHandler<T> {
     }
 }
 
-#[handler_struct]
+#[handler_struct(from_version = 2)]
 pub struct SecondHandler {
     state_bool: bool,
 }
 
-#[handler(SecondMessageGroup)]
+#[handler(message_group = SecondMessageGroup, from_version = 2)]
 impl SecondHandler {
     #[handle(from_version = 2)]
     fn handle_whatever(&self, message: WhateverMessage) {
