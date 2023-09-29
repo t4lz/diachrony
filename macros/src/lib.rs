@@ -10,12 +10,10 @@ use darling::{Error, FromAttributes, FromMeta};
 use macro_state::*;
 use quote::{format_ident, quote, ToTokens};
 use syn::punctuated::Punctuated;
-use syn::token::{Gt, Lt};
 use syn::{
-    parse_macro_input, AngleBracketedGenericArguments, Attribute, Block, Expr, ExprLit, Field,
-    FieldMutability, Fields, FnArg, GenericArgument, GenericParam, Generics, Ident, ImplItem,
-    ImplItemType, ItemEnum, ItemFn, ItemImpl, ItemStruct, Pat, PatIdent, PatType, PathArguments,
-    PathSegment, Token, Type, TypeParam, TypePath, Variant, Visibility,
+    parse_macro_input, Attribute, Block, Expr, ExprLit, Field, Fields, FnArg, GenericParam, Ident,
+    ImplItem, ImplItemType, ItemEnum, ItemFn, ItemImpl, ItemStruct, Pat, PatIdent, PatType,
+    PathSegment, Token, Type, TypePath, Variant, Visibility,
 };
 
 const VERSION_KEY: &str = "diachrony-protocol-version";
@@ -40,7 +38,7 @@ struct MessageMacroArgs {
 }
 
 #[derive(Debug, FromMeta, Default)]
-struct FieldMacroArgs {
+struct OptionalVersionRangeMacroArgs {
     from_version: Option<u16>,
     until_version: Option<u16>,
 }
@@ -59,7 +57,7 @@ struct HandlerMacroArgs {
     until_version: Option<u16>,
 }
 
-impl FromAttributes for FieldMacroArgs {
+impl FromAttributes for OptionalVersionRangeMacroArgs {
     fn from_attributes(attrs: &[Attribute]) -> darling::Result<Self> {
         Ok(attrs
             .iter()
@@ -70,7 +68,7 @@ impl FromAttributes for FieldMacroArgs {
             })
             .map(|attr| {
                 // TODO: unwrap
-                FieldMacroArgs::from_meta(&attr.meta).unwrap()
+                OptionalVersionRangeMacroArgs::from_meta(&attr.meta).unwrap()
             })
             .unwrap_or_default())
     }
@@ -112,7 +110,7 @@ pub fn current_version(arg: TokenStream) -> TokenStream {
 /// `IncomingMessageV1` enum and a `MyMessage(MyMessage2)` to the `IncomingMessageV2` Enum.
 #[proc_macro_attribute]
 pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
-    let mut message_struct = parse_macro_input!(item as ItemStruct);
+    let message_struct = parse_macro_input!(item as ItemStruct);
 
     let args = match parse_macro_args::<MessageMacroArgs>(args) {
         Ok(args) => args,
@@ -130,10 +128,10 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
             // TODO: is_ident is not good, because we also want to match diachrony::field (and we
             //  don't want to match `field` if it's not imported form diachrony.
             if field_attr.path().is_ident("field") {
-                // TODO: unwrap
                 let mut field = field.clone();
                 field.attrs.remove(i);
-                let field_args = FieldMacroArgs::from_meta(&field_attr.meta).unwrap();
+                let field_args =
+                    OptionalVersionRangeMacroArgs::from_meta(&field_attr.meta).unwrap();
                 // TODO: validate that until_version is strictly greater than from_version, if
                 //  they're both specified.
                 if let Some(until_version) = field_args.until_version {
@@ -162,8 +160,7 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
     let mut struct_versions = Vec::with_capacity(version_changes.len());
 
     struct_versions.push(make_struct_version(
-        &mut message_struct,
-        &name,
+        &message_struct,
         args.from_version,
         &message_fields,
     ));
@@ -179,8 +176,7 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
             .cloned()
             .collect();
         struct_versions.push(make_struct_version(
-            &mut message_struct,
-            &name,
+            &message_struct,
             version,
             &message_fields,
         ));
@@ -235,19 +231,18 @@ fn generate_aliases(
 
 /// Create a TokenStream of a message struct of the given version with the given fields.
 fn make_struct_version(
-    message_struct: &mut ItemStruct,
-    base_name: &str,
+    message_struct: &ItemStruct,
     version: u16,
     fields: &HashSet<Field>,
 ) -> TokenStream {
-    let struct_name = format!("{base_name}V{}", version);
-    message_struct.ident = Ident::new(&struct_name, message_struct.ident.span());
+    let mut message_struct = message_struct.clone();
+    message_struct.ident = format_ident!("{}V{version}", message_struct.ident);
     match &mut message_struct.fields {
         Fields::Named(named) => named.named = Punctuated::from_iter(fields.clone()),
         Fields::Unnamed(_) => {}
         Fields::Unit => {}
     }
-    TokenStream::from(message_struct.clone().into_token_stream())
+    TokenStream::from(message_struct.into_token_stream())
 }
 
 #[proc_macro_attribute]
@@ -284,7 +279,9 @@ where
         .position(|attr| attr.path().is_ident(attr_name));
     index.map(|index| {
         let attr = attrs.remove(index);
-        T::from_meta(&attr.meta).unwrap()
+        T::from_meta(&attr.meta).expect(&format!(
+            "Parsing the argument to the #[{attr_name}] attribute failed."
+        ))
     })
 }
 
@@ -357,12 +354,19 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
             .clone()
             .map(|handler_type| format_ident!("{}", handler_type.to_string().to_case(Case::Snake)));
 
-        next_version.variants = Punctuated::from_iter(variants.cloned()); // cloning iter, not all
+        let versionized_variants = variants.cloned().map(|mut variant| {
+            verionize_variant(&mut variant, version);
+            variant
+        });
+
+        next_version.variants = Punctuated::from_iter(versionized_variants.clone()); // cloning iter, not all
 
         let super_handler_versioned_ident = format_ident!("{super_handler_ident}V{version}");
         // TODO: pub?
         let struct_handler_fields = handler_fields.clone();
-        let struct_handler_field_types = handlers.cloned();
+        let struct_handler_field_types = handlers
+            .clone()
+            .map(|ident| get_versionized_ident(ident, version));
         let super_handler = quote! {
             pub struct #super_handler_versioned_ident {
                 #(#struct_handler_fields: #struct_handler_field_types,)*
@@ -370,18 +374,18 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
         };
         output_items.push(super_handler.into_token_stream().into());
 
-        versionize_super_group(&mut next_version, version);
+        versionize_ident(&mut next_version.ident, version);
+        let variant_names = versionized_variants.clone().map(|variant| variant.ident);
 
         let versionized_enum_ident = &next_version.ident;
 
         let self_handler_fields = handler_fields.clone();
-        let match_variants = handler_fields.clone();
         let handler_impls = quote! {
             impl diachrony::HandleMessage for #super_handler_versioned_ident {
                 type Message = #versionized_enum_ident;
                 fn handle(&self, message: Self::Message) {
                     match message {
-                        #(#match_variants => self.#self_handler_fields.handle(message),)*
+                        #(#versionized_enum_ident::#variant_names(message) => self.#self_handler_fields.handle(message),)*
                     }
                 }
             }
@@ -402,19 +406,26 @@ fn versionize_ident(ident: &mut Ident, version: u16) {
     *ident = format_ident!("{}V{version}", ident);
 }
 
-fn versionize_super_group(super_group_enum: &mut ItemEnum, version: u16) {
-    versionize_ident(&mut super_group_enum.ident, version);
-    super_group_enum.variants.iter_mut().for_each(|variant| {
-        versionize_ident(&mut variant.ident, version);
-        let Fields::Unnamed(ref mut unnamed_fields) = variant.fields else {
-            panic!("Expected tuple variant for message group {} under super group {}.", variant.ident.to_string(), super_group_enum.ident.to_string());
-        };
-        let variant_field_type = &mut unnamed_fields.unnamed
-            .first_mut()
-            .unwrap_or_else(|| panic!("Missing unnamed field for tuple variant {} of super group enum {}.", variant.ident.to_string(), super_group_enum.ident.to_string()))
-            .ty;
-        versionize_type(variant_field_type, version);
-    })
+fn get_versionized_ident(ident: &Ident, version: u16) -> Ident {
+    format_ident!("{}V{version}", ident)
+}
+
+fn verionize_variant(variant: &mut Variant, version: u16) {
+    versionize_ident(&mut variant.ident, version);
+    let Fields::Unnamed(ref mut unnamed_fields) = variant.fields else {
+        panic!("Expected tuple variant for message group {}.", variant.ident.to_string());
+    };
+    let variant_field_type = &mut unnamed_fields
+        .unnamed
+        .first_mut()
+        .unwrap_or_else(|| {
+            panic!(
+                "Missing unnamed field for tuple variant {}.",
+                variant.ident.to_string()
+            )
+        })
+        .ty;
+    versionize_type(variant_field_type, version);
 }
 
 fn get_version_range(
@@ -494,56 +505,108 @@ pub fn message_group(args: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
-pub fn handler_struct(_: TokenStream, struct_def: TokenStream) -> TokenStream {
+pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream {
     let mut struct_def = parse_macro_input!(struct_def as ItemStruct);
-    if struct_def.generics.lt_token.is_none() {
-        struct_def.generics = Generics {
-            lt_token: Some(Lt::default()),
-            params: Default::default(),
-            gt_token: Some(Gt::default()),
-            where_clause: None,
-        }
-    }
-    let available_param_name =
-        struct_def
-            .generics
-            .params
-            .iter()
-            .fold("T".to_string(), |acc, param| {
-                if let GenericParam::Type(param) = param {
-                    acc + param.ident.to_string().as_str()
-                } else {
-                    acc
-                }
-            });
-
-    // Add new generic type parameter to struct.
-    struct_def
-        .generics
-        .params
-        .push(GenericParam::Type(TypeParam {
-            attrs: vec![],
-            ident: format_ident!("{available_param_name}"),
-            colon_token: None,
-            bounds: Default::default(),
-            eq_token: None,
-            default: None,
-        }));
+    let args = match parse_macro_args::<OptionalVersionRangeMacroArgs>(args) {
+        Ok(args) => args,
+        Err(error_token_stream) => return error_token_stream,
+    };
+    // if struct_def.generics.lt_token.is_none() {
+    //     struct_def.generics = Generics {
+    //         lt_token: Some(Lt::default()),
+    //         params: Default::default(),
+    //         gt_token: Some(Gt::default()),
+    //         where_clause: None,
+    //     }
+    // }
+    // let available_param_name =
+    //     struct_def
+    //         .generics
+    //         .params
+    //         .iter()
+    //         .fold("T".to_string(), |acc, param| {
+    //             if let GenericParam::Type(param) = param {
+    //                 acc + param.ident.to_string().as_str()
+    //             } else {
+    //                 acc
+    //             }
+    //         });
+    //
+    // // Add new generic type parameter to struct.
+    // struct_def
+    //     .generics
+    //     .params
+    //     .push(GenericParam::Type(TypeParam {
+    //         attrs: vec![],
+    //         ident: format_ident!("{available_param_name}"),
+    //         colon_token: None,
+    //         bounds: Default::default(),
+    //         eq_token: None,
+    //         default: None,
+    //     }));
 
     let Fields::Named(ref mut fields_named) = struct_def.fields else {
         panic!("Expected handler struct to be a struct with named fields")
     };
-    let phantom_type = format!("std::marker::PhantomData<{available_param_name}>");
-    fields_named.named.push(Field {
-        attrs: vec![],
-        vis: Visibility::Inherited,
-        mutability: FieldMutability::None,
-        ident: Some(format_ident!("message_type")),
-        colon_token: None,
-        ty: Type::Path(TypePath::from_string(&phantom_type).unwrap()),
-    });
+    // let phantom_type = format!("std::marker::PhantomData<{available_param_name}>");
+    // fields_named.named.push(Field {
+    //     attrs: vec![],
+    //     vis: Visibility::Inherited,
+    //     mutability: FieldMutability::None,
+    //     ident: Some(format_ident!("message_type")),
+    //     colon_token: None,
+    //     ty: Type::Path(TypePath::from_string(&phantom_type).unwrap()),
+    // });
 
-    struct_def.into_token_stream().into()
+    // TODO: I repeated the whole present, added, removed collecting loop logic a lot. Could be
+    //       Extracted to a generic function.
+    // Which fields are present in the currently processed version, initially first version.
+    let mut present_fields = HashSet::with_capacity(fields_named.named.len());
+
+    // for each version, which fields are new in that version.
+    let mut added_fields = HashMap::<u16, HashSet<Field>>::new();
+
+    // for each version, which fields are no longer present in that version.
+    let mut removed_fields = HashMap::<u16, HashSet<Field>>::new();
+
+    for field in fields_named.named.iter_mut() {
+        let args: Option<OptionalVersionRangeMacroArgs> =
+            parse_attr_args(&mut field.attrs, "handler_field");
+        if let Some(args) = args {
+            if let Some(v) = args.from_version {
+                added_fields.entry(v).or_default().insert(field.clone());
+            } else {
+                // No from - means the field is there from the first version.
+                present_fields.insert(field.clone());
+            }
+            if let Some(v) = args.until_version {
+                removed_fields.entry(v).or_default().insert(field.clone());
+            }
+        } else {
+            // No attr - so field is just always there.
+            present_fields.insert(field.clone());
+        }
+    }
+
+    let current_version = get_current_version();
+    let version_range = get_version_range(args.from_version, args.until_version, current_version);
+    let mut handler_structs = Vec::with_capacity(version_range.len());
+    for version in version_range {
+        // TODO: also this loop code is repeated for many macros.
+        // Super-group enum of this version e.g. `enum ClientMessageV0 { ... }`
+        let next_version = struct_def.clone();
+
+        // Update which variants (message groups) are present in this version.
+        if let Some(removed) = removed_fields.get(&version) {
+            present_fields = &present_fields - removed;
+        }
+        if let Some(added) = added_fields.remove(&version) {
+            present_fields.extend(added.into_iter());
+        }
+        handler_structs.push(make_struct_version(&next_version, version, &present_fields))
+    }
+
+    TokenStream::from_iter(handler_structs)
 }
 
 // Change MyHandler to MyHandlerV0 (, ...V1, ...).
@@ -557,39 +620,11 @@ fn versionize_type(ty: &mut Type, version: u16) {
     versionize_path(&mut get_type_path(ty).path, version)
 }
 
-fn get_impl_type_path(impl_block: &mut ItemImpl) -> &mut TypePath {
-    get_type_path(impl_block.self_ty.as_mut())
-}
-
 fn get_type_path(ty: &mut Type) -> &mut TypePath {
     let Type::Path(ref mut type_path) = ty else {
         panic!("Expected a type path, got {}.", ty.into_token_stream().to_string());
     };
     return type_path;
-}
-
-fn get_path_arguments(impl_block: &mut ItemImpl) -> &mut PathArguments {
-    &mut get_impl_type_path(impl_block)
-        .path
-        .segments
-        .last_mut()
-        .unwrap()
-        .arguments
-}
-
-fn get_gen_arg_type_path(impl_block: &mut ItemImpl) -> &mut TypePath {
-    let args = get_path_arguments(impl_block);
-    let PathArguments::AngleBracketed(generic_args) = args else {
-        unreachable!() // We set it before the loop.
-    };
-    let Some(GenericArgument::Type(Type::Path(type_path))) = generic_args.args.last_mut() else {
-        unreachable!() // We push it before the loop.
-    };
-    type_path
-}
-
-fn make_generic_arg_from_path(path: syn::Path) -> GenericArgument {
-    GenericArgument::Type(Type::Path(TypePath { qself: None, path }))
 }
 
 #[proc_macro_attribute]
@@ -599,28 +634,27 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
         Err(error_token_stream) => return error_token_stream,
     };
     let mut impl_block = parse_macro_input!(impl_block as ItemImpl);
-    let message_group_generic_arg = make_generic_arg_from_path(args.message_group.clone());
-    let handler_name = get_impl_type_path(&mut impl_block).to_owned();
+    // let message_group_generic_arg = make_generic_arg_from_path(args.message_group.clone());
 
-    let generic_arguments = get_path_arguments(&mut impl_block);
-    match generic_arguments {
-        PathArguments::None => {
-            let mut args = Punctuated::new();
-            args.push(message_group_generic_arg);
-            *generic_arguments = PathArguments::AngleBracketed(AngleBracketedGenericArguments {
-                colon2_token: None,
-                lt_token: Default::default(),
-                args,
-                gt_token: Default::default(),
-            });
-        }
-        PathArguments::AngleBracketed(generic_args) => {
-            generic_args.args.push(message_group_generic_arg)
-        }
-        PathArguments::Parenthesized(_) => {
-            panic!("Unexpected")
-        }
-    }
+    // let generic_arguments = get_path_arguments(&mut impl_block);
+    // match generic_arguments {
+    //     PathArguments::None => {
+    //         let mut args = Punctuated::new();
+    //         args.push(message_group_generic_arg);
+    //         *generic_arguments = PathArguments::AngleBracketed(AngleBracketedGenericArguments {
+    //             colon2_token: None,
+    //             lt_token: Default::default(),
+    //             args,
+    //             gt_token: Default::default(),
+    //         });
+    //     }
+    //     PathArguments::AngleBracketed(generic_args) => {
+    //         generic_args.args.push(message_group_generic_arg)
+    //     }
+    //     PathArguments::Parenthesized(_) => {
+    //         panic!("Unexpected")
+    //     }
+    // }
 
     let current_version = get_current_version();
     let mut funcs: Vec<Vec<ImplItem>> = vec![Vec::new(); current_version as usize + 1];
@@ -634,8 +668,8 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
             if let ImplItem::Fn(func) = item {
                 if let Some(macro_args) = func.attrs.iter().find_map(|attr| {
                     attr.path()
-                        .is_ident("handle") // TODO: deal a path like diachrony::handle
-                        .then(|| FieldMacroArgs::from_meta(&attr.meta).unwrap())
+                        .is_ident("handle") // TODO: deal a path like diachrony::handle?
+                        .then(|| OptionalVersionRangeMacroArgs::from_meta(&attr.meta).unwrap())
                 }) {
                     let from = macro_args.from_version.unwrap_or(0);
                     let until = macro_args
@@ -665,13 +699,18 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
     let version_range = get_version_range(args.from_version, args.until_version, current_version);
     for version in version_range {
         let mut impl_block = impl_block.clone();
+        versionize_path(
+            &mut get_type_path(impl_block.self_ty.as_mut()).path,
+            version,
+        );
         let mut message_handler_trait_impl = impl_block.clone();
-        let type_path = get_gen_arg_type_path(&mut impl_block);
-        versionize_path(&mut type_path.path, version);
-        {
-            let type_path = get_gen_arg_type_path(&mut message_handler_trait_impl);
-            versionize_path(&mut type_path.path, version);
-        }
+        let type_path = get_type_path(impl_block.self_ty.as_mut());
+        // let type_path = get_gen_arg_type_path(&mut impl_block);
+        // versionize_path(&mut type_path.path, version);
+        // {
+        //     let type_path = get_gen_arg_type_path(&mut message_handler_trait_impl);
+        //     versionize_path(&mut type_path.path, version);
+        // }
         let segments = Punctuated::from_iter(vec![
             PathSegment {
                 ident: format_ident!("diachrony"),
@@ -690,6 +729,8 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
             },
             Default::default(),
         ));
+        let mut message_group_path = args.message_group.clone();
+        versionize_path(&mut message_group_path, version);
         message_handler_trait_impl
             .items
             .push(ImplItem::Type(ImplItemType {
@@ -700,7 +741,10 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
                 ident: format_ident!("Message"),
                 generics: Default::default(),
                 eq_token: Default::default(),
-                ty: Type::Path(type_path.clone()),
+                ty: Type::Path(TypePath {
+                    qself: None,
+                    path: message_group_path.clone(),
+                }),
                 semi_token: Default::default(),
             }));
         message_handler_trait_impl
@@ -719,8 +763,8 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
         handler_impls.push(message_handler_trait_impl.into_token_stream().into());
 
         let handle_with_impl_for_version = quote! {
-            impl diachrony::HandleWith for #type_path {
-                type Handler = #handler_name<#type_path>;
+            impl diachrony::HandleWith for #message_group_path {
+                type Handler = #type_path;
             }
         };
         handler_impls.push(handle_with_impl_for_version.into_token_stream().into());
@@ -737,7 +781,7 @@ fn make_general_handle_function(
 ) -> ImplItem {
     versionize_path(&mut enum_path, version);
     let token_stream = quote!(
-        fn handle(&self, message: #enum_path) {
+        fn handle(&self, message: Self::Message) {
             match message {
                 #(#enum_path::#variants(exact_message) => self.#func_names(exact_message)),*
             }

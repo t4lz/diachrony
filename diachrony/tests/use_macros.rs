@@ -1,7 +1,7 @@
 use diachrony::*;
 use std::net::TcpStream;
 
-current_version!(4);
+current_version!(3);
 
 #[message(group = ExampleMessageGroup, from_version = 0)]
 #[derive(Debug)]
@@ -40,7 +40,7 @@ pub struct WhateverMessage {
 
 // Generates a super-handler that has all the handlers and calls the appropriate handler.
 #[super_group(handler = ClientMessageSuperHandler)]
-enum ClientMessage {
+pub enum ClientMessage {
     #[group(handler = ExampleMessageHandler, from_version = 0)]
     ExampleMessageGroup(ExampleMessageGroup),
     #[group(handler = SecondHandler, from_version = 2)]
@@ -87,17 +87,6 @@ impl ExampleMessageHandler {
     }
 }
 
-// TODO: generate this
-impl<T> Default for ExampleMessageHandler<T> {
-    fn default() -> Self {
-        Self {
-            state1: Default::default(),
-            state2: Default::default(),
-            message_type: Default::default(),
-        }
-    }
-}
-
 #[handler_struct(from_version = 2)]
 pub struct SecondHandler {
     state_bool: bool,
@@ -112,21 +101,11 @@ impl SecondHandler {
     }
 }
 
-// TODO: generate this
-impl<T> Default for SecondHandler<T> {
-    fn default() -> Self {
-        Self {
-            state_bool: Default::default(),
-            message_type: Default::default(),
-        }
-    }
-}
-
 #[version_dispatch]
 pub fn wrap_raw_connection<ExampleMessageGroup: diachrony::HandleWith>(stream: TcpStream) {
-    let handler = <ExampleMessageGroup as diachrony::HandleWith>::Handler::default();
-    let client_message: ExampleMessageGroup = todo!();
-    client_message.handle_with(handler);
+    // let handler = <ExampleMessageGroup as diachrony::HandleWith>::Handler::default();
+    // let client_message: ExampleMessageGroup = todo!();
+    // client_message.handle_with(handler);
 }
 
 #[test]

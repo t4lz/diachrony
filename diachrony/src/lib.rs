@@ -1,7 +1,7 @@
 pub use diachrony_macros::*;
 
 /// A trait message handlers need to implement.
-pub trait HandleMessage: Default {
+pub trait HandleMessage {
     type Message;
     fn handle(&self, m: Self::Message);
 }
