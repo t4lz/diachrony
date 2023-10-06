@@ -48,6 +48,7 @@ pub enum ClientMessage {
 }
 
 #[handler_struct]
+#[derive(Default)]
 pub struct ExampleMessageHandler {
     state1: u8,
     state2: bool,
@@ -88,6 +89,7 @@ impl ExampleMessageHandler {
 }
 
 #[handler_struct(from_version = 2)]
+#[derive(Default)]
 pub struct SecondHandler {
     state_bool: bool,
 }
@@ -102,13 +104,24 @@ impl SecondHandler {
 }
 
 #[version_dispatch]
-pub fn wrap_raw_connection<ExampleMessageGroup: diachrony::HandleWith>(stream: TcpStream) {
-    // let handler = <ExampleMessageGroup as diachrony::HandleWith>::Handler::default();
-    // let client_message: ExampleMessageGroup = todo!();
-    // client_message.handle_with(handler);
+pub fn wrap_raw_connection<M: ClientMessage>(stream: TcpStream) {
+    let example_handler = M::ExampleHandler::from_all_state(42, false);
+    let second_handler = M::SecondHandler::from_all_state(true);
+    let super_handler = M::Handler::from_all_handlers(example_handler, second_handler);
+    let client_message: ClientMessage = todo!();
+    super_handler.handle(client_message);
 }
+
+// #[version_dispatch]
+// pub fn wrap_raw_connection1<T: ClientMessageSuperHandler>(stream: TcpStream) {
+//     // let handler = <ClientMessage as diachrony::HandleWith>::Handler::default();
+//     // let client_message: ExampleMessageGroup = todo!();
+//     // client_message.handle_with(handler);
+// }
 
 #[test]
 fn construct() {
+    let version = 1; // Some number that is only determined in runtime.
     wrap_raw_connection(1, todo!());
+    version_dispatch!(version, wrap_raw_connection<ClientMessage>)
 }

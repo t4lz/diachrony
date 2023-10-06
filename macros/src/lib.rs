@@ -1,6 +1,7 @@
 extern crate macro_state;
 
 use proc_macro::TokenStream;
+use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
 
@@ -159,11 +160,11 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
     }
     let mut struct_versions = Vec::with_capacity(version_changes.len());
 
-    struct_versions.push(make_struct_version(
-        &message_struct,
-        args.from_version,
-        &message_fields,
-    ));
+    struct_versions.push(
+        make_struct_version(&message_struct, args.from_version, &message_fields)
+            .into_token_stream()
+            .into(),
+    );
 
     let mut last_version = args.from_version;
 
@@ -175,11 +176,11 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
             // TODO: can avoid cloning?
             .cloned()
             .collect();
-        struct_versions.push(make_struct_version(
-            &message_struct,
-            version,
-            &message_fields,
-        ));
+        struct_versions.push(
+            make_struct_version(&message_struct, version, &message_fields)
+                .into_token_stream()
+                .into(),
+        );
         last_version = version;
     }
 
@@ -234,7 +235,7 @@ fn make_struct_version(
     message_struct: &ItemStruct,
     version: u16,
     fields: &HashSet<Field>,
-) -> TokenStream {
+) -> ItemStruct {
     let mut message_struct = message_struct.clone();
     message_struct.ident = format_ident!("{}V{version}", message_struct.ident);
     match &mut message_struct.fields {
@@ -242,7 +243,7 @@ fn make_struct_version(
         Fields::Unnamed(_) => {}
         Fields::Unit => {}
     }
-    TokenStream::from(message_struct.into_token_stream())
+    message_struct
 }
 
 #[proc_macro_attribute]
@@ -297,14 +298,30 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut super_group_enum = parse_macro_input!(item as ItemEnum);
 
+    let super_group_ident = &super_group_enum.ident;
+    let trait_ident = super_group_ident.clone();
+    let all_variants = super_group_enum.variants.clone();
+    let types = all_variants.iter().map(|variant| &variant.ident);
+
+    let trait_associated_types = types.clone();
+    let super_group_trait = quote! {
+        pub trait #trait_ident {
+            #(type #trait_associated_types: HandleWith;)*
+        }
+    };
+
     let mut present_variants = HashSet::with_capacity(super_group_enum.variants.len());
     let mut new_variants: HashMap<u16, HashSet<(Variant, Ident)>> =
         HashMap::with_capacity(super_group_version_range.len());
     let mut removed_variants: HashMap<u16, HashSet<(Variant, Ident)>> =
         HashMap::with_capacity(super_group_version_range.len());
 
+    // TODO: recheck capacity
     let mut output_items =
-        Vec::with_capacity(super_group_enum.variants.len() + super_group_version_range.len() + 1);
+        Vec::with_capacity(super_group_enum.variants.len() + super_group_version_range.len() + 2);
+
+    output_items.push(super_group_trait.clone().into_token_stream().into());
+
     for variant in super_group_enum.variants.iter_mut() {
         let args: SuperGroupMacroArgs = parse_attr_args(&mut variant.attrs, "group").unwrap();
         output_items.push(make_message_group(
@@ -347,6 +364,9 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
         // iterators, for the quote!).
         let variants = present_variants.iter().map(|tup| &tup.0);
         let handlers = present_variants.iter().map(|tup| &tup.1);
+
+        let present_variant_names: HashSet<Ident, RandomState> =
+            HashSet::from_iter(variants.clone().map(|variant| variant.ident.clone()));
 
         // Field names of the super-handler, which are the handlers for the different variants
         // (message groups).
@@ -395,8 +415,25 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
             }
         };
 
+        // TODO: this is inefficient.
+        let associated_types = all_variants.iter().map(|variant| {
+            if present_variant_names.contains(&variant.ident) {
+                let ty = get_first_unnamed_field_type(variant);
+                get_type_path(ty).path.clone()
+            } else {
+                syn::Path::from_string("()").unwrap()
+            }
+        });
+        let trait_associated_types = types.clone();
+        let message_trait_impl = quote! {
+            impl #super_group_ident for #versionized_enum_ident{
+                #(type #trait_associated_types = #associated_types;)*
+            }
+        };
+
         output_items.push(handler_impls.into_token_stream().into());
         output_items.push(next_version.into_token_stream().into());
+        output_items.push(message_trait_impl.into_token_stream().into());
     }
 
     TokenStream::from_iter(output_items)
@@ -410,12 +447,27 @@ fn get_versionized_ident(ident: &Ident, version: u16) -> Ident {
     format_ident!("{}V{version}", ident)
 }
 
-fn verionize_variant(variant: &mut Variant, version: u16) {
-    versionize_ident(&mut variant.ident, version);
+fn get_first_unnamed_field_type(variant: &Variant) -> &Type {
+    let Fields::Unnamed(ref unnamed_fields) = variant.fields else {
+        panic!("Expected tuple variant for message group {}.", variant.ident.to_string());
+    };
+    &unnamed_fields
+        .unnamed
+        .first()
+        .unwrap_or_else(|| {
+            panic!(
+                "Missing unnamed field for tuple variant {}.",
+                variant.ident.to_string()
+            )
+        })
+        .ty
+}
+
+fn get_first_unnamed_field_type_mut(variant: &mut Variant) -> &mut Type {
     let Fields::Unnamed(ref mut unnamed_fields) = variant.fields else {
         panic!("Expected tuple variant for message group {}.", variant.ident.to_string());
     };
-    let variant_field_type = &mut unnamed_fields
+    &mut unnamed_fields
         .unnamed
         .first_mut()
         .unwrap_or_else(|| {
@@ -424,7 +476,12 @@ fn verionize_variant(variant: &mut Variant, version: u16) {
                 variant.ident.to_string()
             )
         })
-        .ty;
+        .ty
+}
+
+fn verionize_variant(variant: &mut Variant, version: u16) {
+    versionize_ident(&mut variant.ident, version);
+    let variant_field_type = get_first_unnamed_field_type_mut(variant);
     versionize_type(variant_field_type, version);
 }
 
@@ -511,55 +568,40 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
         Ok(args) => args,
         Err(error_token_stream) => return error_token_stream,
     };
-    // if struct_def.generics.lt_token.is_none() {
-    //     struct_def.generics = Generics {
-    //         lt_token: Some(Lt::default()),
-    //         params: Default::default(),
-    //         gt_token: Some(Gt::default()),
-    //         where_clause: None,
-    //     }
-    // }
-    // let available_param_name =
-    //     struct_def
-    //         .generics
-    //         .params
-    //         .iter()
-    //         .fold("T".to_string(), |acc, param| {
-    //             if let GenericParam::Type(param) = param {
-    //                 acc + param.ident.to_string().as_str()
-    //             } else {
-    //                 acc
-    //             }
-    //         });
-    //
-    // // Add new generic type parameter to struct.
-    // struct_def
-    //     .generics
-    //     .params
-    //     .push(GenericParam::Type(TypeParam {
-    //         attrs: vec![],
-    //         ident: format_ident!("{available_param_name}"),
-    //         colon_token: None,
-    //         bounds: Default::default(),
-    //         eq_token: None,
-    //         default: None,
-    //     }));
 
     let Fields::Named(ref mut fields_named) = struct_def.fields else {
         panic!("Expected handler struct to be a struct with named fields")
     };
-    // let phantom_type = format!("std::marker::PhantomData<{available_param_name}>");
-    // fields_named.named.push(Field {
-    //     attrs: vec![],
-    //     vis: Visibility::Inherited,
-    //     mutability: FieldMutability::None,
-    //     ident: Some(format_ident!("message_type")),
-    //     colon_token: None,
-    //     ty: Type::Path(TypePath::from_string(&phantom_type).unwrap()),
-    // });
+
+    let handler_ident = &struct_def.ident;
+
+    let current_version = get_current_version();
+    let version_range = get_version_range(args.from_version, args.until_version, current_version);
+    // TODO: check capacity.
+    let mut output_items = Vec::with_capacity(version_range.len() + 1);
+
+    let all_fields = fields_named.clone();
+    let all_field_names = all_fields.named.iter().map(|field| &field.ident);
+    let all_field_types = all_fields.named.iter().map(|field| &field.ty);
+
+    let params = all_field_names.clone();
+
+    let trait_method_sig = quote!(
+        fn from_all_state(#(#params: #all_field_types,)*) -> Self
+    );
+
+    let handler_trait: TokenStream = quote! {
+        pub trait #handler_ident {
+            #trait_method_sig;
+        }
+    }
+    .into_token_stream()
+    .into();
+
+    output_items.push(handler_trait);
 
     // TODO: I repeated the whole present, added, removed collecting loop logic a lot. Could be
-    //       Extracted to a generic function.
+    //       Extracted to a (generic?) function.
     // Which fields are present in the currently processed version, initially first version.
     let mut present_fields = HashSet::with_capacity(fields_named.named.len());
 
@@ -588,9 +630,6 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
         }
     }
 
-    let current_version = get_current_version();
-    let version_range = get_version_range(args.from_version, args.until_version, current_version);
-    let mut handler_structs = Vec::with_capacity(version_range.len());
     for version in version_range {
         // TODO: also this loop code is repeated for many macros.
         // Super-group enum of this version e.g. `enum ClientMessageV0 { ... }`
@@ -603,10 +642,25 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
         if let Some(added) = added_fields.remove(&version) {
             present_fields.extend(added.into_iter());
         }
-        handler_structs.push(make_struct_version(&next_version, version, &present_fields))
+        let next_struct = make_struct_version(&next_version, version, &present_fields);
+        let struct_ident = &next_struct.ident;
+        let fields = present_fields.iter().map(|field| &field.ident);
+        let trait_impl = quote! {
+            impl #handler_ident for #struct_ident {
+                #trait_method_sig {
+                    Self {
+                        #(#fields,)*
+                    }
+                }
+            }
+        }
+        .into_token_stream()
+        .into();
+        output_items.push(next_struct.into_token_stream().into());
+        output_items.push(trait_impl);
     }
 
-    TokenStream::from_iter(handler_structs)
+    TokenStream::from_iter(output_items)
 }
 
 // Change MyHandler to MyHandlerV0 (, ...V1, ...).
@@ -617,14 +671,21 @@ fn versionize_path(path: &mut syn::Path, version: u16) {
 }
 
 fn versionize_type(ty: &mut Type, version: u16) {
-    versionize_path(&mut get_type_path(ty).path, version)
+    versionize_path(&mut get_type_path_mut(ty).path, version)
 }
 
-fn get_type_path(ty: &mut Type) -> &mut TypePath {
+fn get_type_path_mut(ty: &mut Type) -> &mut TypePath {
     let Type::Path(ref mut type_path) = ty else {
         panic!("Expected a type path, got {}.", ty.into_token_stream().to_string());
     };
-    return type_path;
+    type_path
+}
+
+fn get_type_path(ty: &Type) -> &TypePath {
+    let Type::Path(ref type_path) = ty else {
+        panic!("Expected a type path, got {}.", ty.into_token_stream().to_string());
+    };
+    type_path
 }
 
 #[proc_macro_attribute]
@@ -700,11 +761,11 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
     for version in version_range {
         let mut impl_block = impl_block.clone();
         versionize_path(
-            &mut get_type_path(impl_block.self_ty.as_mut()).path,
+            &mut get_type_path_mut(impl_block.self_ty.as_mut()).path,
             version,
         );
         let mut message_handler_trait_impl = impl_block.clone();
-        let type_path = get_type_path(impl_block.self_ty.as_mut());
+        let type_path = get_type_path_mut(impl_block.self_ty.as_mut());
         // let type_path = get_gen_arg_type_path(&mut impl_block);
         // versionize_path(&mut type_path.path, version);
         // {
