@@ -304,11 +304,30 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
     let trait_ident = super_group_ident.clone();
     let all_variants = super_group_enum.variants.clone();
     let types = all_variants.iter().map(|variant| &variant.ident);
+    let handler_ident = args.handler.clone();
 
     let trait_associated_types = types.clone();
     let super_group_trait = quote! {
-        pub trait #trait_ident {
+        pub trait #trait_ident: HandleWith {
             #(type #trait_associated_types: HandleWith;)*
+            type SuperHandler: #handler_ident;
+        }
+    };
+
+    let arg_names = types
+        .clone()
+        .map(|ident| format_ident!("{}", ident.to_string().to_case(Case::Snake)));
+    let arg_types = types.clone();
+
+    let message_ident = super_group_ident.clone();
+    let handler_ident = args.handler.clone();
+
+    let super_handler_trait = quote! {
+        pub trait #handler_ident: HandleMessage {
+            type SuperGroup: #message_ident;
+            fn from_all_handlers(
+                #(#arg_names: <Self::SuperGroup as #message_ident>::#arg_types,)*
+            ) -> Self;
         }
     };
 
@@ -320,9 +339,10 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
 
     // TODO: recheck capacity
     let mut output_items =
-        Vec::with_capacity(super_group_enum.variants.len() + super_group_version_range.len() + 2);
+        Vec::with_capacity(super_group_enum.variants.len() + super_group_version_range.len() + 3);
 
     output_items.push(super_group_trait.clone().into_token_stream().into());
+    output_items.push(super_handler_trait.clone().into_token_stream().into());
 
     for variant in super_group_enum.variants.iter_mut() {
         let args: SuperGroupMacroArgs = parse_attr_args(&mut variant.attrs, "group").unwrap();
@@ -423,7 +443,7 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
                 let ty = get_first_unnamed_field_type(variant);
                 Type::Path(TypePath {
                     qself: None,
-                    path: get_type_path(ty).path.clone(),
+                    path: get_versionized_path(&get_type_path(ty).path, version),
                 })
             } else {
                 Type::Tuple(TypeTuple {
