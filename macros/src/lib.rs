@@ -14,7 +14,7 @@ use syn::punctuated::Punctuated;
 use syn::{
     parse_macro_input, Attribute, Block, Expr, ExprLit, Field, Fields, FnArg, GenericParam, Ident,
     ImplItem, ImplItemType, ItemEnum, ItemFn, ItemImpl, ItemStruct, Pat, PatIdent, PatType,
-    PathSegment, Token, Type, TypeParamBound, TypePath, Variant, Visibility,
+    PathSegment, Token, Type, TypeParamBound, TypePath, TypeTuple, Variant, Visibility,
 };
 
 const VERSION_KEY: &str = "diachrony-protocol-version";
@@ -421,9 +421,15 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
         let associated_types = all_variants.iter().map(|variant| {
             if present_variant_names.contains(&variant.ident) {
                 let ty = get_first_unnamed_field_type(variant);
-                get_type_path(ty).path.clone()
+                Type::Path(TypePath {
+                    qself: None,
+                    path: get_type_path(ty).path.clone(),
+                })
             } else {
-                syn::Path::from_string("()").unwrap()
+                Type::Tuple(TypeTuple {
+                    paren_token: Default::default(),
+                    elems: Default::default(),
+                })
             }
         });
         let trait_associated_types = types.clone();
@@ -896,7 +902,6 @@ pub fn version_dispatch(_args: TokenStream, func: TokenStream) -> TokenStream {
             None
         }
     }).last().expect("version_dispatched func should have a message group name as a generic parameter. E.g. my_func<M: ClientMessage>().");
-    let generic_ident = &last_gen_type.ident;
     let Some(TypeParamBound::Trait(bound )) = last_gen_type.bounds.first() else {
         panic!("`version_dispatch`ed function's generic argument should have a trait bound, E.g. my_func<M: ClientMessage>().");
     };
