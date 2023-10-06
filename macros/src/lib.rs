@@ -24,6 +24,8 @@ const REMOVED_MESSAGES_PREFIX: &str = "diachrony-message-removal";
 const ADDED_MESSAGES_PREFIX: &str = "diachrony-message-addition";
 const VERSION_DISPATCH_ARG_NAME: &str = "diachrony_added_version_arg";
 
+type Version = u16;
+
 #[derive(Default, Debug)]
 struct VersionChange {
     // TODO: for removed fields, we probably don't need the field object, just the name.
@@ -34,28 +36,28 @@ struct VersionChange {
 #[derive(Debug, FromMeta)]
 struct MessageMacroArgs {
     group: Ident,
-    from_version: u16,
-    until_version: Option<u16>,
+    from_version: Version,
+    until_version: Option<Version>,
 }
 
 #[derive(Debug, FromMeta, Default)]
 struct OptionalVersionRangeMacroArgs {
-    from_version: Option<u16>,
-    until_version: Option<u16>,
+    from_version: Option<Version>,
+    until_version: Option<Version>,
 }
 
 #[derive(Debug, FromMeta)]
 struct SuperGroupMacroArgs {
     handler: Ident,
-    from_version: Option<u16>,
-    until_version: Option<u16>,
+    from_version: Option<Version>,
+    until_version: Option<Version>,
 }
 
 #[derive(Debug, FromMeta)]
 struct HandlerMacroArgs {
     message_group: syn::Path,
-    from_version: Option<u16>,
-    until_version: Option<u16>,
+    from_version: Option<Version>,
+    until_version: Option<Version>,
 }
 
 impl FromAttributes for OptionalVersionRangeMacroArgs {
@@ -185,7 +187,7 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let next_version = proc_read_state(VERSION_KEY).map(|v: String| {
-        v.parse::<u16>()
+        v.parse::<Version>()
             .expect("Couldn't parse current version to int")
             + 1
     });
@@ -215,8 +217,8 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
 fn generate_aliases(
     struct_versions: &mut Vec<TokenStream>,
     message_name: &String,
-    last_version: u16,
-    next_changed_version: u16,
+    last_version: Version,
+    next_changed_version: Version,
 ) {
     let last_version_name = format_ident!("{message_name}V{last_version}");
     for alias_version in last_version + 1..next_changed_version {
@@ -233,7 +235,7 @@ fn generate_aliases(
 /// Create a TokenStream of a message struct of the given version with the given fields.
 fn make_struct_version(
     message_struct: &ItemStruct,
-    version: u16,
+    version: Version,
     fields: &HashSet<Field>,
 ) -> ItemStruct {
     let mut message_struct = message_struct.clone();
@@ -256,10 +258,10 @@ pub fn group(_args: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-fn get_current_version() -> u16 {
+fn get_current_version() -> Version {
     proc_read_state(VERSION_KEY)
         .expect("current_version!() not set")
-        .parse::<u16>()
+        .parse::<Version>()
         .expect("Couldn't parse current version to int")
 }
 
@@ -311,9 +313,9 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let mut present_variants = HashSet::with_capacity(super_group_enum.variants.len());
-    let mut new_variants: HashMap<u16, HashSet<(Variant, Ident)>> =
+    let mut new_variants: HashMap<Version, HashSet<(Variant, Ident)>> =
         HashMap::with_capacity(super_group_version_range.len());
-    let mut removed_variants: HashMap<u16, HashSet<(Variant, Ident)>> =
+    let mut removed_variants: HashMap<Version, HashSet<(Variant, Ident)>> =
         HashMap::with_capacity(super_group_version_range.len());
 
     // TODO: recheck capacity
@@ -439,11 +441,11 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from_iter(output_items)
 }
 
-fn versionize_ident(ident: &mut Ident, version: u16) {
+fn versionize_ident(ident: &mut Ident, version: Version) {
     *ident = format_ident!("{}V{version}", ident);
 }
 
-fn get_versionized_ident(ident: &Ident, version: u16) -> Ident {
+fn get_versionized_ident(ident: &Ident, version: Version) -> Ident {
     format_ident!("{}V{version}", ident)
 }
 
@@ -479,17 +481,17 @@ fn get_first_unnamed_field_type_mut(variant: &mut Variant) -> &mut Type {
         .ty
 }
 
-fn verionize_variant(variant: &mut Variant, version: u16) {
+fn verionize_variant(variant: &mut Variant, version: Version) {
     versionize_ident(&mut variant.ident, version);
     let variant_field_type = get_first_unnamed_field_type_mut(variant);
     versionize_type(variant_field_type, version);
 }
 
 fn get_version_range(
-    from_version: Option<u16>,
-    until_version: Option<u16>,
-    current_version: u16,
-) -> RangeInclusive<u16> {
+    from_version: Option<Version>,
+    until_version: Option<Version>,
+    current_version: Version,
+) -> RangeInclusive<Version> {
     from_version.unwrap_or_default()
         ..=until_version
             .map(|v| std::cmp::min(v - 1, current_version))
@@ -498,8 +500,8 @@ fn get_version_range(
 
 fn make_message_group(
     group_name_ident: &Ident,
-    from_version: Option<u16>,
-    until_version: Option<u16>,
+    from_version: Option<Version>,
+    until_version: Option<Version>,
 ) -> TokenStream {
     let group_name = group_name_ident.to_string();
 
@@ -606,10 +608,10 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
     let mut present_fields = HashSet::with_capacity(fields_named.named.len());
 
     // for each version, which fields are new in that version.
-    let mut added_fields = HashMap::<u16, HashSet<Field>>::new();
+    let mut added_fields = HashMap::<Version, HashSet<Field>>::new();
 
     // for each version, which fields are no longer present in that version.
-    let mut removed_fields = HashMap::<u16, HashSet<Field>>::new();
+    let mut removed_fields = HashMap::<Version, HashSet<Field>>::new();
 
     for field in fields_named.named.iter_mut() {
         let args: Option<OptionalVersionRangeMacroArgs> =
@@ -664,20 +666,20 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
 }
 
 // Change MyHandler to MyHandlerV0 (, ...V1, ...).
-fn versionize_path(path: &mut syn::Path, version: u16) {
+fn versionize_path(path: &mut syn::Path, version: Version) {
     let last_segment = path.segments.last_mut().unwrap();
     let last_ident = &last_segment.ident;
     last_segment.ident = format_ident!("{last_ident}V{version}");
 }
 
 // Change MyHandler to MyHandlerV0 (, ...V1, ...).
-fn get_versionized_path(path: &syn::Path, version: u16) -> syn::Path {
+fn get_versionized_path(path: &syn::Path, version: Version) -> syn::Path {
     let mut path = path.clone();
     versionize_path(&mut path, version);
     path
 }
 
-fn versionize_type(ty: &mut Type, version: u16) {
+fn versionize_type(ty: &mut Type, version: Version) {
     versionize_path(&mut get_type_path_mut(ty).path, version)
 }
 
@@ -845,7 +847,7 @@ fn make_general_handle_function(
     mut enum_path: syn::Path,
     func_names: &Vec<Ident>,
     variants: &Vec<syn::Path>,
-    version: u16,
+    version: Version,
 ) -> ImplItem {
     versionize_path(&mut enum_path, version);
     let token_stream = quote!(
@@ -924,6 +926,7 @@ pub fn version_dispatch(_args: TokenStream, func: TokenStream) -> TokenStream {
     let types = versions
         .clone()
         .map(|v| get_versionized_path(message_path, v));
+    // TODO: this does not use `Version` :(
     let versions = versions.map(|v| proc_macro2::Literal::u16_suffixed(v));
 
     let version_arg = format_ident!("{VERSION_DISPATCH_ARG_NAME}");
@@ -946,6 +949,7 @@ pub fn version_dispatch(_args: TokenStream, func: TokenStream) -> TokenStream {
     *func.block = parse_macro_input!(dispatcher_code as Block);
 
     let segments = Punctuated::from_iter(vec![PathSegment {
+        // TODO: this does not use `Version` :(
         ident: format_ident!("u16"),
         arguments: Default::default(),
     }]);
@@ -990,10 +994,10 @@ mod tests {
     #[case(Some(1), Some(7), 5, 1..=5)] // `until` is higher than current: versions until current.
     #[case(Some(1), Some(6), 5, 1..=5)] // Here `until` and current both limit to 5.
     fn version_range(
-        #[case] from_version: Option<u16>,
-        #[case] until_version: Option<u16>,
-        #[case] current_version: u16,
-        #[case] expected_range: RangeInclusive<u16>,
+        #[case] from_version: Option<Version>,
+        #[case] until_version: Option<Version>,
+        #[case] current_version: Version,
+        #[case] expected_range: RangeInclusive<Version>,
     ) {
         assert_eq!(
             get_version_range(from_version, until_version, current_version),
