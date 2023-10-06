@@ -14,7 +14,7 @@ use syn::punctuated::Punctuated;
 use syn::{
     parse_macro_input, Attribute, Block, Expr, ExprLit, Field, Fields, FnArg, GenericParam, Ident,
     ImplItem, ImplItemType, ItemEnum, ItemFn, ItemImpl, ItemStruct, Pat, PatIdent, PatType,
-    PathSegment, Token, Type, TypePath, Variant, Visibility,
+    PathSegment, Token, Type, TypeParamBound, TypePath, Variant, Visibility,
 };
 
 const VERSION_KEY: &str = "diachrony-protocol-version";
@@ -670,6 +670,13 @@ fn versionize_path(path: &mut syn::Path, version: u16) {
     last_segment.ident = format_ident!("{last_ident}V{version}");
 }
 
+// Change MyHandler to MyHandlerV0 (, ...V1, ...).
+fn get_versionized_path(path: &syn::Path, version: u16) -> syn::Path {
+    let mut path = path.clone();
+    versionize_path(&mut path, version);
+    path
+}
+
 fn versionize_type(ty: &mut Type, version: u16) {
     versionize_path(&mut get_type_path_mut(ty).path, version)
 }
@@ -872,6 +879,9 @@ pub fn handle(_args: TokenStream, func: TokenStream) -> TokenStream {
     func
 }
 
+/// Transforms a function that is generic over a message version type to function that takes a
+/// version and calls the original function of that version of the message.
+// TODO: Example
 #[proc_macro_attribute]
 pub fn version_dispatch(_args: TokenStream, func: TokenStream) -> TokenStream {
     let mut func = parse_macro_input!(func as ItemFn);
@@ -883,8 +893,12 @@ pub fn version_dispatch(_args: TokenStream, func: TokenStream) -> TokenStream {
         } else {
             None
         }
-    }).last().expect("version_dispatched func should have a message group name as a generic parameter. E.g. my_func<ClientMessage>().");
+    }).last().expect("version_dispatched func should have a message group name as a generic parameter. E.g. my_func<M: ClientMessage>().");
     let generic_ident = &last_gen_type.ident;
+    let Some(TypeParamBound::Trait(bound )) = last_gen_type.bounds.first() else {
+        panic!("`version_dispatch`ed function's generic argument should have a trait bound, E.g. my_func<M: ClientMessage>().");
+    };
+    let message_path = &bound.path;
 
     let name = &inner_func.sig.ident;
     let inner_name = format_ident!("versionized_{name}");
@@ -906,9 +920,10 @@ pub fn version_dispatch(_args: TokenStream, func: TokenStream) -> TokenStream {
 
     let current_version = get_current_version();
     let versions = 0..=current_version;
+    // FIXME: this does not preserve the other generic arguments.
     let types = versions
         .clone()
-        .map(|v| format_ident!("{generic_ident}V{v}"));
+        .map(|v| get_versionized_path(message_path, v));
     let versions = versions.map(|v| proc_macro2::Literal::u16_suffixed(v));
 
     let version_arg = format_ident!("{VERSION_DISPATCH_ARG_NAME}");

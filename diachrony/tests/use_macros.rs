@@ -122,6 +122,5 @@ pub fn wrap_raw_connection<M: ClientMessage>(stream: TcpStream) {
 #[test]
 fn construct() {
     let version = 1; // Some number that is only determined in runtime.
-    wrap_raw_connection(1, todo!());
-    version_dispatch!(version, wrap_raw_connection<ClientMessage>)
+    wrap_raw_connection(version, todo!());
 }
