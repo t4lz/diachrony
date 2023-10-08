@@ -314,22 +314,8 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let arg_names = types
-        .clone()
-        .map(|ident| format_ident!("{}", ident.to_string().to_case(Case::Snake)));
-    let arg_types = types.clone();
-
     let message_ident = super_group_ident.clone();
     let handler_ident = args.handler.clone();
-
-    let super_handler_trait = quote! {
-        pub trait #handler_ident: HandleMessage {
-            type SuperGroup: #message_ident;
-            fn from_all_handlers(
-                #(#arg_names: <Self::SuperGroup as #message_ident>::#arg_types,)*
-            ) -> Self;
-        }
-    };
 
     let mut present_variants = HashSet::with_capacity(super_group_enum.variants.len());
     let mut new_variants: HashMap<Version, HashSet<(Variant, Ident)>> =
@@ -342,10 +328,12 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
         Vec::with_capacity(super_group_enum.variants.len() + super_group_version_range.len() + 3);
 
     output_items.push(super_group_trait.clone().into_token_stream().into());
-    output_items.push(super_handler_trait.clone().into_token_stream().into());
+
+    let mut all_handlers = Vec::with_capacity(super_group_enum.variants.len());
 
     for variant in super_group_enum.variants.iter_mut() {
         let args: SuperGroupMacroArgs = parse_attr_args(&mut variant.attrs, "group").unwrap();
+        all_handlers.push(args.handler.clone());
         output_items.push(make_message_group(
             &variant.ident,
             args.from_version,
@@ -367,6 +355,30 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
                 .insert((variant.clone(), args.handler));
         }
     }
+
+    let arg_types = types.clone();
+    let func_arg_types = arg_types.clone();
+
+    let arg_names = all_handlers
+        .iter()
+        .map(|ident| format_ident!("{}", ident.to_string().to_case(Case::Snake)));
+    let func_arg_names = arg_names.clone();
+
+    let from_all_handlers_sig = quote! {
+        fn from_all_handlers(
+                #(#func_arg_names: <<Self::SuperGroup as #message_ident>::#func_arg_types as HandleWith>::Handler,)*
+            ) -> Self
+    };
+
+    let sig = from_all_handlers_sig.clone();
+
+    let super_handler_trait = quote! {
+        pub trait #handler_ident: HandleMessage {
+            type SuperGroup: #message_ident;
+            #sig;
+        }
+    };
+    output_items.push(super_handler_trait.clone().into_token_stream().into());
 
     let super_handler_ident = args.handler;
 
@@ -422,6 +434,8 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
         let versionized_enum_ident = &next_version.ident;
 
         let self_handler_fields = handler_fields.clone();
+        let constructor_handler_fields = handler_fields.clone();
+        let sig = from_all_handlers_sig.clone();
         let handler_impls = quote! {
             impl diachrony::HandleMessage for #super_handler_versioned_ident {
                 type Message = #versionized_enum_ident;
@@ -434,6 +448,15 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
 
             impl diachrony::HandleWith for #versionized_enum_ident {
                 type Handler = #super_handler_versioned_ident;
+            }
+
+            impl #super_handler_ident for #super_handler_versioned_ident {
+                type SuperGroup = #versionized_enum_ident;
+                #sig {
+                    Self {
+                        #(#constructor_handler_fields,)*
+                    }
+                }
             }
         };
 
