@@ -105,9 +105,19 @@ impl SecondHandler {
 
 #[version_dispatch]
 pub fn wrap_raw_connection<M: ClientMessage>(stream: TcpStream) {
-    let example_handler = M::ExampleHandler::from_all_state(42, false);
-    let second_handler = M::SecondHandler::from_all_state(true);
-    let super_handler = M::SuperHandler::from_all_handlers(example_handler, second_handler);
+    let example_handler =
+        <<<M as ClientMessage>::ExampleMessageGroup as ExampleMessageGroup>::Handler as ExampleMessageHandler>::from_all_state(
+            42, false,
+        );
+    let second_handler =
+        <<<M as ClientMessage>::SecondMessageGroup as SecondMessageGroup>::Handler as SecondHandler>::from_all_state(
+            true
+        );
+    let super_handler =
+        <<M as ClientMessage>::SuperHandler as ClientMessageSuperHandler>::from_all_handlers(
+            example_handler,
+            second_handler,
+        );
     let client_message: M = todo!();
     super_handler.handle(client_message);
 }

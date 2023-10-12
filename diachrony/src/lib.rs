@@ -2,7 +2,7 @@ pub use diachrony_macros::*;
 
 /// A trait message handlers need to implement.
 pub trait HandleMessage {
-    type Message;
+    type Message: HandleWith<Handler = Self>;
     fn handle(&self, m: Self::Message);
 }
 
@@ -13,4 +13,16 @@ pub trait HandleWith: Sized {
     fn handle_with(self, handler: Self::Handler) {
         handler.handle(self)
     }
+}
+
+impl HandleMessage for () {
+    type Message = ();
+
+    fn handle(&self, _m: Self::Message) {}
+}
+
+impl HandleWith for () {
+    type Handler = ();
+
+    fn handle_with(self, _handler: Self::Handler) {}
 }

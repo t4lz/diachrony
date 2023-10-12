@@ -309,8 +309,8 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
     let trait_associated_types = types.clone();
     let super_group_trait = quote! {
         pub trait #trait_ident: HandleWith {
-            #(type #trait_associated_types: HandleWith;)*
-            type SuperHandler: #handler_ident;
+            #(type #trait_associated_types: #trait_associated_types;)*
+            type SuperHandler: #handler_ident<SuperGroup=Self>;
         }
     };
 
@@ -366,15 +366,15 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
 
     let from_all_handlers_sig = quote! {
         fn from_all_handlers(
-                #(#func_arg_names: <<Self::SuperGroup as #message_ident>::#func_arg_types as HandleWith>::Handler,)*
+                #(#func_arg_names: <<Self::SuperGroup as #message_ident>::#func_arg_types as #func_arg_types>::Handler,)*
             ) -> Self
     };
 
     let sig = from_all_handlers_sig.clone();
 
     let super_handler_trait = quote! {
-        pub trait #handler_ident: HandleMessage {
-            type SuperGroup: #message_ident;
+        pub trait #handler_ident: HandleMessage<Message=Self::SuperGroup> {
+            type SuperGroup: #message_ident<SuperHandler=Self>;
             #sig;
         }
     };
@@ -479,6 +479,7 @@ pub fn super_group(args: TokenStream, item: TokenStream) -> TokenStream {
         let message_trait_impl = quote! {
             impl #super_group_ident for #versionized_enum_ident{
                 #(type #trait_associated_types = #associated_types;)*
+                type SuperHandler = #super_handler_versioned_ident;
             }
         };
 
@@ -559,13 +560,6 @@ fn make_message_group(
 
     let mut message_types = BTreeSet::new();
 
-    let group_trait = quote! {
-        trait #group_name_ident {}
-    }
-    .into_token_stream()
-    .into();
-    version_enums.push(group_trait);
-
     let version_range = get_version_range(from_version, until_version, current_version);
 
     for version in version_range {
@@ -644,6 +638,12 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
     let handler_trait: TokenStream = quote! {
         pub trait #handler_ident {
             #trait_method_sig;
+        }
+
+        impl #handler_ident for () {
+            #trait_method_sig {
+                ()
+            }
         }
     }
     .into_token_stream()
@@ -753,27 +753,7 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
         Err(error_token_stream) => return error_token_stream,
     };
     let mut impl_block = parse_macro_input!(impl_block as ItemImpl);
-    // let message_group_generic_arg = make_generic_arg_from_path(args.message_group.clone());
-
-    // let generic_arguments = get_path_arguments(&mut impl_block);
-    // match generic_arguments {
-    //     PathArguments::None => {
-    //         let mut args = Punctuated::new();
-    //         args.push(message_group_generic_arg);
-    //         *generic_arguments = PathArguments::AngleBracketed(AngleBracketedGenericArguments {
-    //             colon2_token: None,
-    //             lt_token: Default::default(),
-    //             args,
-    //             gt_token: Default::default(),
-    //         });
-    //     }
-    //     PathArguments::AngleBracketed(generic_args) => {
-    //         generic_args.args.push(message_group_generic_arg)
-    //     }
-    //     PathArguments::Parenthesized(_) => {
-    //         panic!("Unexpected")
-    //     }
-    // }
+    let handler_type = (*impl_block.self_ty).clone();
 
     let current_version = get_current_version();
     let mut funcs: Vec<Vec<ImplItem>> = vec![Vec::new(); current_version as usize + 1];
@@ -813,7 +793,23 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
         .collect();
 
     // TODO: code was changed, so recalculate capacity.
-    let mut handler_impls: Vec<TokenStream> = Vec::with_capacity(current_version as usize);
+    let mut output_items: Vec<TokenStream> = Vec::with_capacity(current_version as usize);
+
+    let message_group_path = args.message_group.clone();
+
+    let group_trait = quote! {
+        trait #message_group_path: HandleWith {
+            type Handler: #handler_type;
+        }
+
+        impl #message_group_path for () {
+            type Handler = ();
+        }
+
+    }
+    .into_token_stream()
+    .into();
+    output_items.push(group_trait);
 
     let version_range = get_version_range(args.from_version, args.until_version, current_version);
     for version in version_range {
@@ -848,8 +844,9 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
             },
             Default::default(),
         ));
-        let mut message_group_path = args.message_group.clone();
-        versionize_path(&mut message_group_path, version);
+        let message_group_path = args.message_group.clone();
+        let mut message_group_path_versionized = message_group_path.clone();
+        versionize_path(&mut message_group_path_versionized, version);
         message_handler_trait_impl
             .items
             .push(ImplItem::Type(ImplItemType {
@@ -862,7 +859,7 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
                 eq_token: Default::default(),
                 ty: Type::Path(TypePath {
                     qself: None,
-                    path: message_group_path.clone(),
+                    path: message_group_path_versionized.clone(),
                 }),
                 semi_token: Default::default(),
             }));
@@ -878,17 +875,20 @@ pub fn handler(args: TokenStream, impl_block: TokenStream) -> TokenStream {
 
         // TODO: eliminate the cloning here, use a collection that allows moving out for `funcs`.
         impl_block.items.extend(funcs[version as usize].clone());
-        handler_impls.push(impl_block.into_token_stream().into());
-        handler_impls.push(message_handler_trait_impl.into_token_stream().into());
+        output_items.push(impl_block.into_token_stream().into());
+        output_items.push(message_handler_trait_impl.into_token_stream().into());
 
         let handle_with_impl_for_version = quote! {
-            impl diachrony::HandleWith for #message_group_path {
+            impl diachrony::HandleWith for #message_group_path_versionized {
+                type Handler = #type_path;
+            }
+            impl #message_group_path for #message_group_path_versionized {
                 type Handler = #type_path;
             }
         };
-        handler_impls.push(handle_with_impl_for_version.into_token_stream().into());
+        output_items.push(handle_with_impl_for_version.into_token_stream().into());
     }
-    TokenStream::from_iter(handler_impls)
+    TokenStream::from_iter(output_items)
 }
 
 /// Create the `handle` function that gets an enum object, matches it and calls the appropriate function.
