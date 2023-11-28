@@ -35,7 +35,7 @@ struct VersionChange {
 
 #[derive(Debug, FromMeta)]
 struct MessageMacroArgs {
-    group: Ident,
+    group: Option<Ident>,
     from_version: Version,
     until_version: Option<Version>,
 }
@@ -44,6 +44,9 @@ struct MessageMacroArgs {
 struct OptionalVersionRangeMacroArgs {
     from_version: Option<Version>,
     until_version: Option<Version>,
+    // TODO: maybe a better interface would allow to just specify that word and not require also
+    //       writing `=true` next to it.
+    versioned: Option<bool>,
 }
 
 #[derive(Debug, FromMeta)]
@@ -113,6 +116,15 @@ pub fn current_version(arg: TokenStream) -> TokenStream {
 /// `IncomingMessageV1` enum and a `MyMessage(MyMessage2)` to the `IncomingMessageV2` Enum.
 #[proc_macro_attribute]
 pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
+    versionization_macro(args, item)
+}
+
+#[proc_macro_attribute]
+pub fn versionize(args: TokenStream, item: TokenStream) -> TokenStream {
+    versionization_macro(args, item)
+}
+
+fn versionization_macro(args: TokenStream, item: TokenStream) -> TokenStream {
     let message_struct = parse_macro_input!(item as ItemStruct);
 
     let args = match parse_macro_args::<MessageMacroArgs>(args) {
@@ -122,6 +134,7 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut version_changes = BTreeMap::new();
     let mut message_fields = HashSet::new();
+    let mut versioned_fields = HashSet::new();
 
     let fields = message_struct.fields.clone();
     let name = message_struct.ident.to_string();
@@ -135,6 +148,11 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
                 field.attrs.remove(i);
                 let field_args =
                     OptionalVersionRangeMacroArgs::from_meta(&field_attr.meta).unwrap();
+                if field_args.versioned.unwrap_or_default() {
+                    // This field is itself versioned, so it should have a different type in each
+                    // version of this struct.
+                    versioned_fields.insert(field.ident.clone().unwrap());
+                }
                 // TODO: validate that until_version is strictly greater than from_version, if
                 //  they're both specified.
                 if let Some(until_version) = field_args.until_version {
@@ -152,7 +170,7 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
                     let VersionChange { new_fields, .. } = version_change;
                     new_fields.insert(field);
                 } else {
-                    message_fields.insert(field.clone());
+                    message_fields.insert(field);
                 }
                 continue 'fields;
             }
@@ -160,56 +178,56 @@ pub fn message(args: TokenStream, item: TokenStream) -> TokenStream {
         // No `field` attribute.
         message_fields.insert(field.clone());
     }
-    let mut struct_versions = Vec::with_capacity(version_changes.len());
-
-    struct_versions.push(
-        make_struct_version(&message_struct, args.from_version, &message_fields)
-            .into_token_stream()
-            .into(),
-    );
-
-    let mut last_version = args.from_version;
-
-    for (version, version_change) in version_changes {
-        generate_aliases(&mut struct_versions, &name, last_version, version);
-        message_fields = &message_fields - &version_change.removed_fields;
-        message_fields = message_fields
-            .union(&version_change.new_fields)
-            // TODO: can avoid cloning?
-            .cloned()
-            .collect();
-        struct_versions.push(
-            make_struct_version(&message_struct, version, &message_fields)
-                .into_token_stream()
-                .into(),
-        );
-        last_version = version;
-    }
+    // TODO: calculate capacity (the code changed).
+    let mut struct_versions = Vec::<TokenStream>::with_capacity(version_changes.len());
 
     let next_version = proc_read_state(VERSION_KEY).map(|v: String| {
         v.parse::<Version>()
             .expect("Couldn't parse current version to int")
             + 1
     });
+    // the first version of the group that does not contain this message.
     let until_version = match (args.until_version, next_version) {
         (Some(message_deprecation_version), Ok(next_version)) => std::cmp::min(message_deprecation_version, next_version),
         (Some(message_deprecation_version), Err(_)) => message_deprecation_version,
         (None, Ok(next_version)) => next_version,
         (None, Err(_)) => panic!("Did not get either an until_version for the message or a current_version! for the crate."),
     };
-    let removed_messages_state_key = format!(
-        "{REMOVED_MESSAGES_PREFIX}-{}-{until_version}",
-        args.group.to_string()
-    );
-    proc_append_state(&removed_messages_state_key, &name).unwrap(); // unwrap?
-    let added_messages_state_key = format!(
-        "{ADDED_MESSAGES_PREFIX}-{}-{}",
-        args.group.to_string(),
-        args.from_version
-    );
-    proc_append_state(&added_messages_state_key, &name).unwrap(); // unwrap?
 
-    generate_aliases(&mut struct_versions, &name, last_version, until_version);
+    // Create a new struct type for each version of this message struct.
+    for version in args.from_version..until_version {
+        // If there are any fields added or removed in this version - do that.
+        if let Some(version_change) = version_changes.get(&version) {
+            message_fields = &message_fields - &version_change.removed_fields;
+            message_fields = message_fields
+                .union(&version_change.new_fields)
+                // TODO: can avoid cloning?
+                .cloned()
+                .collect();
+        }
+        struct_versions.push(
+            make_struct_version(&message_struct, version, &message_fields, &versioned_fields)
+                .into_token_stream()
+                .into(),
+        );
+    }
+
+    // This codes saves macro state (sketchy) in order to tell the group macro about this member -
+    // when it was added and when it was removed.
+    // That way when we generate different enums for different versions of the group, we know in
+    // which ones to include this message and in which ones not to.
+    // If group is not specified the struct with this attribute
+    if let Some(group) = args.group {
+        let group_str = group.to_string();
+        let removed_messages_state_key =
+            format!("{REMOVED_MESSAGES_PREFIX}-{}-{until_version}", &group_str);
+        proc_append_state(&removed_messages_state_key, &name).unwrap(); // unwrap?
+        let added_messages_state_key = format!(
+            "{ADDED_MESSAGES_PREFIX}-{}-{}",
+            group_str, args.from_version
+        );
+        proc_append_state(&added_messages_state_key, &name).unwrap(); // unwrap?
+    }
 
     TokenStream::from_iter(struct_versions)
 }
@@ -237,11 +255,24 @@ fn make_struct_version(
     message_struct: &ItemStruct,
     version: Version,
     fields: &HashSet<Field>,
+    versioned_fields: &HashSet<Ident>,
 ) -> ItemStruct {
     let mut message_struct = message_struct.clone();
     message_struct.ident = format_ident!("{}V{version}", message_struct.ident);
+    let fields: Vec<Field> = fields
+        .iter()
+        .cloned()
+        .map(|mut field| {
+            if let Some(ident) = field.ident.as_mut() {
+                if versioned_fields.contains(ident) {
+                    versionize_type(&mut field.ty, version);
+                }
+            }
+            field
+        })
+        .collect();
     match &mut message_struct.fields {
-        Fields::Named(named) => named.named = Punctuated::from_iter(fields.clone()),
+        Fields::Named(named) => named.named = Punctuated::from_iter(fields),
         Fields::Unnamed(_) => {}
         Fields::Unit => {}
     }
@@ -662,6 +693,9 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
     // for each version, which fields are no longer present in that version.
     let mut removed_fields = HashMap::<Version, HashSet<Field>>::new();
 
+    // TODO
+    let mut versioned_fields = HashSet::new();
+
     for field in fields_named.named.iter_mut() {
         let args: Option<OptionalVersionRangeMacroArgs> =
             parse_attr_args(&mut field.attrs, "handler_field");
@@ -693,7 +727,8 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
         if let Some(added) = added_fields.remove(&version) {
             present_fields.extend(added.into_iter());
         }
-        let next_struct = make_struct_version(&next_version, version, &present_fields);
+        let next_struct =
+            make_struct_version(&next_version, version, &present_fields, &versioned_fields);
         let struct_ident = &next_struct.ident;
         let fields = present_fields.iter().map(|field| &field.ident);
         let trait_impl = quote! {
