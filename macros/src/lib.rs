@@ -170,13 +170,23 @@ fn versionization_macro(args: TokenStream, item: TokenStream) -> TokenStream {
                     let VersionChange { new_fields, .. } = version_change;
                     new_fields.insert(field);
                 } else {
-                    message_fields.insert(field);
+                    message_fields.insert(field.clone());
+                    version_changes
+                        .entry(args.from_version)
+                        .or_default()
+                        .new_fields
+                        .insert(field);
                 }
                 continue 'fields;
             }
         }
         // No `field` attribute.
         message_fields.insert(field.clone());
+        version_changes
+            .entry(args.from_version)
+            .or_default()
+            .new_fields
+            .insert(field);
     }
     // TODO: calculate capacity (the code changed).
     let mut struct_versions = Vec::<TokenStream>::with_capacity(version_changes.len());
@@ -196,8 +206,10 @@ fn versionization_macro(args: TokenStream, item: TokenStream) -> TokenStream {
 
     // Create a new struct type for each version of this message struct.
     for version in args.from_version..until_version {
+        let mut changed = false;
         // If there are any fields added or removed in this version - do that.
         if let Some(version_change) = version_changes.get(&version) {
+            changed = true;
             message_fields = &message_fields - &version_change.removed_fields;
             message_fields = message_fields
                 .union(&version_change.new_fields)
@@ -205,11 +217,17 @@ fn versionization_macro(args: TokenStream, item: TokenStream) -> TokenStream {
                 .cloned()
                 .collect();
         }
-        struct_versions.push(
-            make_struct_version(&message_struct, version, &message_fields, &versioned_fields)
+        let versionized = versionize_fields(&message_fields, &versioned_fields, version);
+        changed |= versionized.is_some();
+        let version_struct = if changed {
+            let version_fields = versionized.unwrap_or(message_fields.iter().cloned().collect());
+            make_struct_version(&message_struct, version, version_fields)
                 .into_token_stream()
-                .into(),
-        );
+                .into()
+        } else {
+            generate_alias(&name, version)
+        };
+        struct_versions.push(version_struct);
     }
 
     // This codes saves macro state (sketchy) in order to tell the group macro about this member -
@@ -232,6 +250,17 @@ fn versionization_macro(args: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from_iter(struct_versions)
 }
 
+fn generate_alias(message_name: &String, version: Version) -> TokenStream {
+    let last_version = version - 1;
+    let last_version_name = format_ident!("{message_name}V{last_version}");
+    let alias_name = format_ident!("{message_name}V{version}");
+    let type_alias = quote! {
+        type #alias_name = #last_version_name;
+    };
+    // into: convert from proc_macro2's TokenStream to standard TokenStream.
+    type_alias.into_token_stream().into()
+}
+
 fn generate_aliases(
     struct_versions: &mut Vec<TokenStream>,
     message_name: &String,
@@ -250,27 +279,41 @@ fn generate_aliases(
     }
 }
 
-/// Create a TokenStream of a message struct of the given version with the given fields.
-fn make_struct_version(
-    message_struct: &ItemStruct,
-    version: Version,
+/// If any of the fields is versioned (is itself of a type that has versions) then return some
+/// vector of the fields where the versioned fields are versionized (if `x: X` is versioned, then
+/// change it to `x: XV0` or whatever version). Else `None`.
+fn versionize_fields(
     fields: &HashSet<Field>,
     versioned_fields: &HashSet<Ident>,
-) -> ItemStruct {
-    let mut message_struct = message_struct.clone();
-    message_struct.ident = format_ident!("{}V{version}", message_struct.ident);
+    version: Version,
+) -> Option<Vec<Field>> {
+    let mut versionized = false;
     let fields: Vec<Field> = fields
         .iter()
         .cloned()
         .map(|mut field| {
             if let Some(ident) = field.ident.as_mut() {
+                // possible optimization: we check if the field is versioned on each message version
+                // we could refactor to only check once.
                 if versioned_fields.contains(ident) {
+                    versionized = true;
                     versionize_type(&mut field.ty, version);
                 }
             }
             field
         })
         .collect();
+    versionized.then_some(fields)
+}
+
+/// Create a TokenStream of a message struct of the given version with the given fields.
+fn make_struct_version(
+    message_struct: &ItemStruct,
+    version: Version,
+    fields: Vec<Field>,
+) -> ItemStruct {
+    let mut message_struct = message_struct.clone();
+    message_struct.ident = format_ident!("{}V{version}", message_struct.ident);
     match &mut message_struct.fields {
         Fields::Named(named) => named.named = Punctuated::from_iter(fields),
         Fields::Unnamed(_) => {}
@@ -693,9 +736,6 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
     // for each version, which fields are no longer present in that version.
     let mut removed_fields = HashMap::<Version, HashSet<Field>>::new();
 
-    // TODO
-    let mut versioned_fields = HashSet::new();
-
     for field in fields_named.named.iter_mut() {
         let args: Option<OptionalVersionRangeMacroArgs> =
             parse_attr_args(&mut field.attrs, "handler_field");
@@ -727,8 +767,11 @@ pub fn handler_struct(args: TokenStream, struct_def: TokenStream) -> TokenStream
         if let Some(added) = added_fields.remove(&version) {
             present_fields.extend(added.into_iter());
         }
-        let next_struct =
-            make_struct_version(&next_version, version, &present_fields, &versioned_fields);
+        let next_struct = make_struct_version(
+            &next_version,
+            version,
+            present_fields.iter().cloned().collect(),
+        );
         let struct_ident = &next_struct.ident;
         let fields = present_fields.iter().map(|field| &field.ident);
         let trait_impl = quote! {
